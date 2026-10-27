@@ -13,6 +13,8 @@ A "Needs review" tile flags any warrant that doesn't reconcile, isn't full detai
 
 The ledger also backs itself up: once a day, and on demand from the "Backups" section at the bottom of the page, it snapshots the database and every stored PDF into one downloadable `.tar.gz`, keeping the last 14. "Export CSV" in the top bar gives you category/vendor totals; "Export line items" gives you every transaction as its own row instead, for a meeting packet or your own pivot tables.
 
+Each line item is also checked against that vendor's own history: if an invoice is unusually large relative to what that vendor normally runs (at least a few prior data points, and at least 3x the vendor's typical amount, with a dollar floor so a vendor that normally spends a few dollars doesn't get flagged for spending a few dollars more) it's flagged — on the "Needs review" tile, on the warrant's own detail view, in that vendor's drill-down, and live in the review step before you even save. "Settings" in the top bar opens an editor for the category taxonomy and vendor alias list themselves, so a shift in Sutton's batch naming or a new recurring vendor is a quick edit there instead of a code change and redeploy.
+
 Everything else — the category taxonomy, vendor normalization, the review-before-save flow, sortable/resizable columns — is the same frontend code.
 
 ## Running it
@@ -87,11 +89,16 @@ docker compose exec ledger node scripts/backfill-pdf-text.js
 - `POST /api/backups` — trigger a fresh backup now (same thing the daily schedule does); returns its filename.
 - `GET /api/backups/:name` — download one backup archive.
 - `DELETE /api/backups/:name` — delete one backup archive.
+- `GET /api/taxonomy` — the category-matching rules, in order: `{ rules: [{ name, groups, isDefault }, ...] }`. `groups` is disjunctive-normal-form — an array of OR'd groups, each an array of terms that must ALL appear (AND) in a department/batch label for that group to match. The one rule with `isDefault: true` is used when nothing else matches.
+- `PUT /api/taxonomy` — replace the whole rule list with `{ rules: [...] }`, same shape as the GET — names must be non-empty and unique, and exactly one rule must be `isDefault: true`.
+- `GET /api/vendor-aliases` — the vendor-alias list, in order: `{ aliases: [{ canonical, triggers }, ...] }`. Any invoice vendor name containing one of a row's triggers (case-insensitive substring match) is folded into that canonical name.
+- `PUT /api/vendor-aliases` — replace the whole alias list with `{ aliases: [...] }`, same shape as the GET; a row with no canonical name or no triggers is dropped.
 - `POST /api/extract` — `{ prompt, images: [{data, mediaType}] }` → calls the Anthropic API with the page images and returns the parsed JSON reply. Internal to the frontend; not meant to be called directly.
 
 ## Notes
 
 - This is built for one person's use (a single School Committee member tracking bill schedules), not multi-user access control — there's no login. Don't expose port 3000 to the open internet without putting it behind your own auth (a reverse proxy with basic auth, a VPN, Tailscale, etc.).
-- The categorization taxonomy and vendor alias list live in `public/index.html` (`categorize()` and `VENDOR_ALIASES`) — edit them directly if Sutton's batch naming changes.
+- The categorization taxonomy and vendor alias list are stored in the database (`taxonomy_rules` / `vendor_aliases`), seeded once from Sutton's original 13-category taxonomy — edit them from "Settings" in the top bar rather than in code. `scripts/backfill-summary-rows.js` reads the same tables, so a backfill honors whatever rules are currently in effect.
+- Per-invoice anomaly flagging (an invoice unusually large for that vendor) is computed entirely in the browser from the line items already loaded — nothing is stored for it, so changing the thresholds (`ANOMALY_MIN_HISTORY`, `ANOMALY_MULTIPLE`, `ANOMALY_MIN_DELTA` near the top of the script in `public/index.html`) takes effect immediately on the next load, no migration needed.
 - `ANTHROPIC_MODEL` in `.env` lets you pin a specific model; see [Anthropic's model docs](https://docs.claude.com/en/docs/about-claude/models) for current ids.
 - Backups and full-text search depend on `poppler-utils` and `tar` being present in the image (both installed in the Dockerfile). A backup or PDF indexing attempt fails gracefully if either is missing — nothing else breaks — but you'll want to rebuild the image (`docker compose up -d --build`) if you're upgrading from a version of this app that predates them.

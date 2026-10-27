@@ -87,6 +87,73 @@ db.exec(`
   )
 `);
 
+// Category-matching rules and the vendor-alias list used to auto-categorize
+// every uploaded bill schedule — editable from the Settings panel in the UI
+// instead of requiring a code change + redeploy. Brand-new tables, so
+// CREATE TABLE IF NOT EXISTS alone is enough; no column migration needed.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS taxonomy_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    groups TEXT NOT NULL,
+    isDefault INTEGER NOT NULL DEFAULT 0,
+    sortOrder INTEGER NOT NULL
+  )
+`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS vendor_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical TEXT NOT NULL,
+    triggers TEXT NOT NULL,
+    sortOrder INTEGER NOT NULL
+  )
+`);
+
+// Seed from the taxonomy/aliases this app shipped with before either table
+// existed (the old hardcoded CATEGORIES/categorize()/VENDOR_ALIASES in
+// public/index.html) — only when the table is empty, so an upgrade never
+// clobbers rules someone has since edited through the Settings panel.
+// "groups" is disjunctive-normal-form: an array of OR'd groups, each an
+// array of terms that must ALL be present (AND) — e.g. Special Education —
+// Transportation needs both "special education" and "transport".
+const DEFAULT_TAXONOMY = [
+  { name: "Special Education — Transportation", groups: [["special education", "transport"]] },
+  { name: "Special Education — Tuition & Services", groups: [["special education"]] },
+  { name: "Transportation — General (Contracted)", groups: [["transport"], ["bus fee"]] },
+  { name: "Maintenance & Facilities", groups: [["maintenance"], ["facility"], ["facilities"]] },
+  { name: "Capital Projects", groups: [["capital"]] },
+  { name: "Utilities", groups: [["utilit"]] },
+  { name: "Technology", groups: [["technology"], ["software"]] },
+  { name: "Athletics", groups: [["athletic"]] },
+  { name: "Food Services", groups: [["food service"]] },
+  { name: "Administration", groups: [["admin"], ["tuition reimbursement"]] },
+  { name: "Curriculum / Instructional", groups: [["early learning"], ["elementary"], ["middle school"], ["high school"], ["library"]] },
+  { name: "Health", groups: [["health"]] },
+  { name: "Extracurricular & Revolving Funds", groups: [], isDefault: true },
+];
+const DEFAULT_VENDOR_ALIASES = [
+  { canonical: "Amazon Capital Services", triggers: ["amazon", "amzn"] },
+  { canonical: "Whitewater, Inc.", triggers: ["whitewater"] },
+  { canonical: "Spencer Meadow Solar", triggers: ["spencer meadow"] },
+  { canonical: "Evergreen Center", triggers: ["evergreen center"] },
+  { canonical: "Great Minds PBC", triggers: ["great minds"] },
+  { canonical: "AA Transportation", triggers: ["aa transportation"] },
+  { canonical: "National Grid", triggers: ["national grid"] },
+  { canonical: "RFK Community Alliance", triggers: ["rfk community"] },
+];
+if (db.prepare("SELECT COUNT(*) AS n FROM taxonomy_rules").get().n === 0) {
+  const insert = db.prepare("INSERT INTO taxonomy_rules (name, groups, isDefault, sortOrder) VALUES (?, ?, ?, ?)");
+  db.transaction(() => {
+    DEFAULT_TAXONOMY.forEach((r, i) => insert.run(r.name, JSON.stringify(r.groups), r.isDefault ? 1 : 0, i));
+  })();
+}
+if (db.prepare("SELECT COUNT(*) AS n FROM vendor_aliases").get().n === 0) {
+  const insert = db.prepare("INSERT INTO vendor_aliases (canonical, triggers, sortOrder) VALUES (?, ?, ?)");
+  db.transaction(() => {
+    DEFAULT_VENDOR_ALIASES.forEach((a, i) => insert.run(a.canonical, JSON.stringify(a.triggers), i));
+  })();
+}
+
 // Escapes % _ and \ for a LIKE pattern using \ as the escape character.
 function likeEscape(s) {
   return String(s).replace(/[\\%_]/g, (c) => "\\" + c);
@@ -374,6 +441,67 @@ app.put("/api/budgets/:fy", (req, res) => {
   });
   tx();
   res.json({ ok: true, fy, count: entries.length });
+});
+
+// The category-matching rules and vendor-alias list, editable from the
+// Settings panel in the UI — same "whole-object replace" shape as budgets
+// above: the client sends the complete desired list and the server replaces
+// it wholesale rather than merging.
+app.get("/api/taxonomy", (req, res) => {
+  const rows = db.prepare("SELECT name, groups, isDefault FROM taxonomy_rules ORDER BY sortOrder").all();
+  res.json({ rules: rows.map((r) => ({ name: r.name, groups: JSON.parse(r.groups), isDefault: Boolean(r.isDefault) })) });
+});
+
+app.put("/api/taxonomy", (req, res) => {
+  const body = req.body || {};
+  const rules = Array.isArray(body.rules) ? body.rules : [];
+  if (!rules.length) return res.status(400).json({ error: "At least one category is required." });
+  const cleaned = [];
+  const seen = new Set();
+  for (const r of rules) {
+    const name = String((r && r.name) || "").trim();
+    if (!name) return res.status(400).json({ error: "Every category needs a name." });
+    const key = name.toLowerCase();
+    if (seen.has(key)) return res.status(400).json({ error: `Category name "${name}" is used more than once.` });
+    seen.add(key);
+    const groups = Array.isArray(r.groups)
+      ? r.groups
+          .map((g) => (Array.isArray(g) ? g.map((t) => String(t || "").trim().toLowerCase()).filter(Boolean) : []))
+          .filter((g) => g.length)
+      : [];
+    cleaned.push({ name, groups, isDefault: Boolean(r.isDefault) });
+  }
+  const defaults = cleaned.filter((r) => r.isDefault);
+  if (defaults.length !== 1) return res.status(400).json({ error: "Pick exactly one default category (used when nothing else matches)." });
+  db.transaction(() => {
+    db.prepare("DELETE FROM taxonomy_rules").run();
+    const insert = db.prepare("INSERT INTO taxonomy_rules (name, groups, isDefault, sortOrder) VALUES (?, ?, ?, ?)");
+    cleaned.forEach((r, i) => insert.run(r.name, JSON.stringify(r.groups), r.isDefault ? 1 : 0, i));
+  })();
+  res.json({ ok: true, count: cleaned.length });
+});
+
+app.get("/api/vendor-aliases", (req, res) => {
+  const rows = db.prepare("SELECT canonical, triggers FROM vendor_aliases ORDER BY sortOrder").all();
+  res.json({ aliases: rows.map((r) => ({ canonical: r.canonical, triggers: JSON.parse(r.triggers) })) });
+});
+
+app.put("/api/vendor-aliases", (req, res) => {
+  const body = req.body || {};
+  const aliases = Array.isArray(body.aliases) ? body.aliases : [];
+  const cleaned = [];
+  for (const a of aliases) {
+    const canonical = String((a && a.canonical) || "").trim();
+    const triggers = Array.isArray(a && a.triggers) ? a.triggers.map((t) => String(t || "").trim()).filter(Boolean) : [];
+    if (!canonical || !triggers.length) continue; // silently drop incomplete rows rather than erroring
+    cleaned.push({ canonical, triggers });
+  }
+  db.transaction(() => {
+    db.prepare("DELETE FROM vendor_aliases").run();
+    const insert = db.prepare("INSERT INTO vendor_aliases (canonical, triggers, sortOrder) VALUES (?, ?, ?)");
+    cleaned.forEach((a, i) => insert.run(a.canonical, JSON.stringify(a.triggers), i));
+  })();
+  res.json({ ok: true, count: cleaned.length });
 });
 
 app.post("/api/extract", async (req, res) => {

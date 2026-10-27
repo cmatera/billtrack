@@ -36,46 +36,83 @@ const DRY_RUN = args.includes("--dry-run");
 const ONLY_ID = (args.find((a) => a.startsWith("--id=")) || "").slice(5) || null;
 const FORCE = args.includes("--force"); // reprocess even if summaryRows is already populated
 
-// ---- the same 13-category taxonomy as public/index.html (categorize()) ---
-function categorize(rawLabel) {
+// Categorization/vendor-normalization are no longer hardcoded here — both
+// now live in the taxonomy_rules / vendor_aliases tables (editable from the
+// Settings panel in the UI), loaded from the database in main() below so a
+// backfill honors whatever rules are currently in effect instead of
+// whatever this script shipped with. categorizeWithRules()/
+// normalizeVendorWithAliases() are the same matching algorithm as
+// public/index.html's generic helpers — kept here as a plain copy since
+// this script runs standalone (no server, no browser).
+//
+// Fallback defaults, used only if the tables are somehow missing (e.g. this
+// script is run against a database older than server.js's migration) —
+// identical to server.js's DEFAULT_TAXONOMY / DEFAULT_VENDOR_ALIASES.
+const FALLBACK_TAXONOMY = [
+  { name: "Special Education — Transportation", groups: [["special education", "transport"]] },
+  { name: "Special Education — Tuition & Services", groups: [["special education"]] },
+  { name: "Transportation — General (Contracted)", groups: [["transport"], ["bus fee"]] },
+  { name: "Maintenance & Facilities", groups: [["maintenance"], ["facility"], ["facilities"]] },
+  { name: "Capital Projects", groups: [["capital"]] },
+  { name: "Utilities", groups: [["utilit"]] },
+  { name: "Technology", groups: [["technology"], ["software"]] },
+  { name: "Athletics", groups: [["athletic"]] },
+  { name: "Food Services", groups: [["food service"]] },
+  { name: "Administration", groups: [["admin"], ["tuition reimbursement"]] },
+  { name: "Curriculum / Instructional", groups: [["early learning"], ["elementary"], ["middle school"], ["high school"], ["library"]] },
+  { name: "Health", groups: [["health"]] },
+  { name: "Extracurricular & Revolving Funds", groups: [], isDefault: true },
+];
+const FALLBACK_VENDOR_ALIASES = [
+  { canonical: "Amazon Capital Services", triggers: ["amazon", "amzn"] },
+  { canonical: "Whitewater, Inc.", triggers: ["whitewater"] },
+  { canonical: "Spencer Meadow Solar", triggers: ["spencer meadow"] },
+  { canonical: "Evergreen Center", triggers: ["evergreen center"] },
+  { canonical: "Great Minds PBC", triggers: ["great minds"] },
+  { canonical: "AA Transportation", triggers: ["aa transportation"] },
+  { canonical: "National Grid", triggers: ["national grid"] },
+  { canonical: "RFK Community Alliance", triggers: ["rfk community"] },
+];
+
+function loadTaxonomyRules(db) {
+  try {
+    const rows = db.prepare("SELECT name, groups, isDefault FROM taxonomy_rules ORDER BY sortOrder").all();
+    if (rows.length) return rows.map((r) => ({ name: r.name, groups: JSON.parse(r.groups), isDefault: Boolean(r.isDefault) }));
+  } catch (_) {}
+  return FALLBACK_TAXONOMY;
+}
+function loadVendorAliases(db) {
+  try {
+    const rows = db.prepare("SELECT canonical, triggers FROM vendor_aliases ORDER BY sortOrder").all();
+    if (rows.length) return rows.map((r) => ({ canonical: r.canonical, triggers: JSON.parse(r.triggers) }));
+  } catch (_) {}
+  return FALLBACK_VENDOR_ALIASES;
+}
+
+// Checked in order; the rule flagged isDefault is tried last regardless of
+// its position in the list — same algorithm as public/index.html's
+// categorizeWithRules().
+function categorizeWithRules(rules, rawLabel) {
   const s = String(rawLabel || "").toLowerCase();
-  const has = (...terms) => terms.some((t) => s.includes(t));
-  if (has("special education") && has("transport")) return "Special Education — Transportation";
-  if (has("special education")) return "Special Education — Tuition & Services";
-  if (has("transport") || has("bus fee")) return "Transportation — General (Contracted)";
-  if (has("maintenance") || has("facility") || has("facilities")) return "Maintenance & Facilities";
-  if (has("capital")) return "Capital Projects";
-  if (has("utilit")) return "Utilities";
-  if (has("technology") || has("software")) return "Technology";
-  if (has("athletic")) return "Athletics";
-  if (has("food service")) return "Food Services";
-  if (has("admin") || has("tuition reimbursement")) return "Administration";
-  if (has("early learning") || has("elementary") || has("middle school") || has("high school") || has("library")) return "Curriculum / Instructional";
-  if (has("health")) return "Health";
-  return "Extracurricular & Revolving Funds";
+  for (const rule of rules) {
+    if (rule.isDefault) continue;
+    if ((rule.groups || []).some((group) => group.length && group.every((term) => s.includes(term)))) return rule.name;
+  }
+  const def = rules.find((r) => r.isDefault);
+  return def ? def.name : rules[0] ? rules[0].name : "Uncategorized";
 }
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
-// Same vendor-alias table as public/index.html (normalizeVendor()), so a
-// backfilled vendor line item matches the name already used in "Spending
-// by vendor" and can be clicked into from there.
-const VENDOR_ALIASES = [
-  [/\bamazon\b|^amzn/i, "Amazon Capital Services"],
-  [/whitewater/i, "Whitewater, Inc."],
-  [/spencer meadow/i, "Spencer Meadow Solar"],
-  [/evergreen center/i, "Evergreen Center"],
-  [/great minds/i, "Great Minds PBC"],
-  [/aa transportation/i, "AA Transportation"],
-  [/national grid/i, "National Grid"],
-  [/rfk community/i, "RFK Community Alliance"],
-];
-function normalizeVendor(raw) {
+function normalizeVendorWithAliases(aliases, raw) {
   let s = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s) return "Unknown vendor";
-  for (const [re, canon] of VENDOR_ALIASES) if (re.test(s)) return canon;
+  const lower = s.toLowerCase();
+  for (const a of aliases) {
+    if ((a.triggers || []).some((t) => t && lower.includes(String(t).toLowerCase()))) return a.canonical;
+  }
   return s;
 }
 
@@ -182,18 +219,18 @@ async function extractWarrantFromPages(pageFiles, label) {
 // Same fallback as the browser's openReview(): if no batch-summary table was
 // found anywhere in the document but there are vendor line items, synthesize
 // one summary row per line item instead of leaving the category empty.
-function toSummaryRows(merged) {
+function toSummaryRows(merged, taxonomyRules) {
   let rows = (merged.summaryRows || []).map((r) => ({
     batch: r.batch || "—",
     department: r.department || "",
-    category: categorize(r.department),
+    category: categorizeWithRules(taxonomyRules, r.department),
     amount: round2(r.amount),
   }));
   if (!rows.length && merged.lineItems && merged.lineItems.length) {
     rows = merged.lineItems.map((li) => ({
       batch: "—",
       department: li.vendor || "",
-      category: categorize((li.vendor || "") + " " + (li.description || "")),
+      category: categorizeWithRules(taxonomyRules, (li.vendor || "") + " " + (li.description || "")),
       amount: round2(li.amount),
     }));
   }
@@ -203,9 +240,9 @@ function toSummaryRows(merged) {
 // Per-vendor-line detail, parallel to toSummaryRows() but for the vendor
 // side — this is what backfills the vendor drill-down and PO-overage
 // flags for warrants uploaded before the lineItems column existed.
-function toLineItems(merged) {
+function toLineItems(merged, vendorAliases) {
   return (merged.lineItems || []).map((li) => ({
-    vendor: normalizeVendor(li.vendor),
+    vendor: normalizeVendorWithAliases(vendorAliases, li.vendor),
     description: li.description || "",
     amount: round2(li.amount),
     exceedsPoBy: round2(li.exceedsPoBy || 0),
@@ -218,6 +255,8 @@ async function main() {
     process.exit(1);
   }
   const db = new Database(DB_FILE);
+  const taxonomyRules = loadTaxonomyRules(db);
+  const vendorAliases = loadVendorAliases(db);
 
   const isEmptyJsonArray = (text) => {
     try {
@@ -272,8 +311,8 @@ async function main() {
         continue;
       }
       const merged = await extractWarrantFromPages(raster.files, label);
-      const summaryRows = toSummaryRows(merged);
-      const lineItems = toLineItems(merged);
+      const summaryRows = toSummaryRows(merged, taxonomyRules);
+      const lineItems = toLineItems(merged, vendorAliases);
       const poFlagged = lineItems.filter((li) => li.exceedsPoBy > 0).length;
 
       if (!summaryRows.length && !lineItems.length) {

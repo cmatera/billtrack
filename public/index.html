@@ -193,6 +193,7 @@ tbody tr:hover{background:var(--surface-2)}
     <div style="display:flex;gap:8px;align-items:center">
       <button class="btn ghost small" id="exportBtn" title="Export category &amp; vendor totals as CSV">Export CSV</button>
       <button class="btn ghost small" id="exportLineItemsBtn" title="Export every batch-summary row as its own CSV line — one per transaction, not just totals">Export line items</button>
+      <button class="btn ghost small" id="settingsBtn" title="Edit the category taxonomy and vendor alias list used to categorize every upload">Settings</button>
       <button class="btn primary" id="uploadBtn">Upload bill schedule</button>
       <input type="file" id="fileInput" accept="application/pdf" multiple hidden>
     </div>
@@ -353,6 +354,7 @@ tbody tr:hover{background:var(--surface-2)}
             <th title="Invoice description or line-item detail as printed on the bill schedule."><span class="hd">Description</span></th>
             <th style="text-align:right" title="Dollar amount for this line item."><span class="hd">Amount</span></th>
             <th style="text-align:right" title="If the bill schedule flagged this invoice as exceeding its purchase order, the overage amount."><span class="hd">Exceeds PO</span></th>
+            <th style="text-align:right" title="Unusually large relative to this vendor's own history on file, once there's enough history to tell."><span class="hd">Unusual?</span></th>
           </tr></thead>
           <tbody id="rvLineRows"></tbody>
         </table>
@@ -425,6 +427,7 @@ tbody tr:hover{background:var(--surface-2)}
             <th title="Invoice description or line-item detail as printed on the bill schedule.">Description</th>
             <th style="text-align:right" title="Dollar amount for this line item.">Amount</th>
             <th style="text-align:right" title="Purchase-order overage flagged on the bill schedule, if any.">Exceeds PO</th>
+            <th style="text-align:right" title="Unusually large relative to this vendor's own history on file.">Unusual?</th>
             <th title="Opens the original bill schedule PDF this line item came from, if it's on file."></th>
           </tr></thead>
           <tbody id="vdDetailBody"></tbody>
@@ -453,6 +456,51 @@ tbody tr:hover{background:var(--surface-2)}
           <tbody id="rqBody"></tbody>
         </table>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal: category taxonomy + vendor alias editor -->
+<div class="modal" id="settingsModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <div><h3>Settings</h3><div class="desc">Edit the category taxonomy and vendor alias list used to categorize every upload</div></div>
+      <button class="x" id="settingsClose" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <h3 style="font-size:14px;margin-bottom:6px">Categories</h3>
+      <div class="desc" style="font-size:11.5px;color:var(--ink-dim);margin-bottom:10px">Checked top to bottom — the first matching category wins. Triggers: comma-separated groups, "+" inside a group means every term in it must appear (e.g. <span class="mono">special education + transport</span>). The default category needs no triggers — it catches everything else.</div>
+      <div class="scroll-box" style="margin-bottom:10px;max-height:320px">
+        <table class="mini-table">
+          <thead><tr>
+            <th style="width:76px"></th>
+            <th>Category name</th>
+            <th>Triggers (comma = or, + = and)</th>
+            <th style="width:64px" title="The one category used when nothing else matches">Default</th>
+            <th style="width:32px"></th>
+          </tr></thead>
+          <tbody id="taxRows"></tbody>
+        </table>
+      </div>
+      <button class="btn small" id="addCategoryBtn">Add category</button>
+
+      <h3 style="font-size:14px;margin:22px 0 6px">Vendor aliases</h3>
+      <div class="desc" style="font-size:11.5px;color:var(--ink-dim);margin-bottom:10px">Any invoice vendor name containing one of a row's triggers (comma-separated, case-insensitive) is folded into that canonical name.</div>
+      <div class="scroll-box" style="margin-bottom:10px;max-height:260px">
+        <table class="mini-table">
+          <thead><tr>
+            <th>Canonical name</th>
+            <th>Triggers (comma-separated)</th>
+            <th style="width:32px"></th>
+          </tr></thead>
+          <tbody id="aliasRows"></tbody>
+        </table>
+      </div>
+      <button class="btn small" id="addAliasBtn">Add vendor alias</button>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="settingsCancel">Cancel</button>
+      <button class="btn primary" id="settingsSave">Save settings</button>
     </div>
   </div>
 </div>
@@ -489,59 +537,60 @@ function toast(msg, kind){
 }
 
 /* ---------------------------------------------------------------- *
- * The 13-category taxonomy used throughout the committee's review,
- * applied deterministically so every upload is categorized the same
- * way. Order matters: more specific checks run before general ones.
+ * The category taxonomy and vendor alias list used throughout the
+ * committee's review — editable from the Settings panel instead of
+ * hardcoded here. The server seeds both from Sutton's original
+ * 13-category taxonomy; state.taxonomy.rules / state.vendorAliases hold
+ * whatever's currently saved, loaded by loadTaxonomy()/loadVendorAliases()
+ * before the first render. CATEGORIES stays a plain name list so the
+ * ~9 existing call sites throughout this file don't need to change.
  * ---------------------------------------------------------------- */
-const CATEGORIES = [
-  "Special Education — Tuition & Services",
-  "Special Education — Transportation",
-  "Transportation — General (Contracted)",
-  "Maintenance & Facilities",
-  "Capital Projects",
-  "Utilities",
-  "Technology",
-  "Athletics",
-  "Food Services",
-  "Administration",
-  "Curriculum / Instructional",
-  "Health",
-  "Extracurricular & Revolving Funds",
-];
+let CATEGORIES = []; // populated from state.taxonomy.rules once loaded
 
-function categorize(rawLabel){
+// Checked in order; the rule flagged isDefault is tried last regardless of
+// its position in the list, so reordering it in Settings never changes
+// matching — only the relative order of the non-default rows does. "groups"
+// is disjunctive-normal-form: OR'd groups, each requiring every one of its
+// terms (AND) — e.g. Special Education — Transportation needs both
+// "special education" and "transport" in one group.
+function categorizeWithRules(rules, rawLabel){
   const s = String(rawLabel || "").toLowerCase();
-  const has = (...terms) => terms.some(t => s.includes(t));
-  if (has("special education") && has("transport")) return "Special Education — Transportation";
-  if (has("special education")) return "Special Education — Tuition & Services";
-  if (has("transport") || has("bus fee")) return "Transportation — General (Contracted)";
-  if (has("maintenance") || has("facility") || has("facilities")) return "Maintenance & Facilities";
-  if (has("capital")) return "Capital Projects";
-  if (has("utilit")) return "Utilities";
-  if (has("technology") || has("software")) return "Technology";
-  if (has("athletic")) return "Athletics";
-  if (has("food service")) return "Food Services";
-  if (has("admin") || has("tuition reimbursement")) return "Administration";
-  if (has("early learning") || has("elementary") || has("middle school") || has("high school") || has("library")) return "Curriculum / Instructional";
-  if (has("health")) return "Health";
-  return "Extracurricular & Revolving Funds";
+  for (const rule of rules) {
+    if (rule.isDefault) continue;
+    if ((rule.groups || []).some(group => group.length && group.every(term => s.includes(term)))) return rule.name;
+  }
+  const def = rules.find(r => r.isDefault);
+  return def ? def.name : (rules[0] ? rules[0].name : "Uncategorized");
+}
+function categorize(rawLabel){
+  return categorizeWithRules(state.taxonomy.rules, rawLabel);
 }
 
-const VENDOR_ALIASES = [
-  [/\bamazon\b|^amzn/i, "Amazon Capital Services"],
-  [/whitewater/i, "Whitewater, Inc."],
-  [/spencer meadow/i, "Spencer Meadow Solar"],
-  [/evergreen center/i, "Evergreen Center"],
-  [/great minds/i, "Great Minds PBC"],
-  [/aa transportation/i, "AA Transportation"],
-  [/national grid/i, "National Grid"],
-  [/rfk community/i, "RFK Community Alliance"],
-];
-function normalizeVendor(raw){
+function normalizeVendorWithAliases(aliases, raw){
   let s = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s) return "Unknown vendor";
-  for (const [re, canon] of VENDOR_ALIASES) if (re.test(s)) return canon;
+  const lower = s.toLowerCase();
+  for (const a of aliases) {
+    if ((a.triggers || []).some(t => t && lower.includes(String(t).toLowerCase()))) return a.canonical;
+  }
   return s;
+}
+function normalizeVendor(raw){
+  return normalizeVendorWithAliases(state.vendorAliases, raw);
+}
+
+// Settings-panel mini-syntax for a category's triggers: comma separates
+// OR'd groups, "+" inside a group means every term in it must appear (AND)
+// — e.g. "special education + transport, bus fee" is two groups, one of
+// which requires both terms.
+function parseGroupsText(text){
+  return String(text || "")
+    .split(",")
+    .map(g => g.split("+").map(t => t.trim().toLowerCase()).filter(Boolean))
+    .filter(g => g.length);
+}
+function groupsToText(groups){
+  return (groups || []).map(g => g.join(" + ")).join(", ");
 }
 
 function mmddyyyyToISO(s){
@@ -571,12 +620,48 @@ function fyLabel(fy){ return fy == null ? "—" : "FY" + String(fy).slice(-2); }
 // total, if it's not full-detail (seeded/legacy data), or if its category
 // rows were guessed from vendor line items rather than a real batch-summary
 // table (the same "—" batch marker openReview()'s fallback synthesis uses).
+// Per-invoice anomaly detection — flags a line item that's unusually large
+// relative to that vendor's own history, computed client-side from the line
+// items already loaded (vendorMedianCache, refreshed every renderAll())
+// rather than stored on the warrant, so it works retroactively on backfilled
+// data too. Needs a few prior data points for a vendor before it'll flag
+// anything, and a dollar floor so a vendor that normally spends $5 doesn't
+// get flagged for spending $20.
+const ANOMALY_MIN_HISTORY = 3;
+const ANOMALY_MULTIPLE = 3;
+const ANOMALY_MIN_DELTA = 250;
+let vendorMedianCache = {};
+function vendorMedianAmounts(ws){
+  const byVendor = {};
+  ws.forEach(w => (w.lineItems || []).forEach(li => {
+    if (!li.vendor) return;
+    (byVendor[li.vendor] = byVendor[li.vendor] || []).push(Number(li.amount) || 0);
+  }));
+  const out = {};
+  Object.entries(byVendor).forEach(([vendor, amounts]) => {
+    const sorted = amounts.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    out[vendor] = {
+      median: sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2,
+      count: sorted.length,
+    };
+  });
+  return out;
+}
+function isAnomalousAmount(amount, medianInfo){
+  if (!medianInfo || medianInfo.count < ANOMALY_MIN_HISTORY || !medianInfo.median) return false;
+  const amt = Number(amount) || 0;
+  return amt >= medianInfo.median * ANOMALY_MULTIPLE && (amt - medianInfo.median) >= ANOMALY_MIN_DELTA;
+}
+
 function reviewFlags(w){
   const flags = [];
   if (w.reconciled === false) flags.push({ key: "mismatch", label: "Reconciliation mismatch" });
   if (w.quality && w.quality !== "full") flags.push({ key: "partial", label: "Not full detail (" + w.quality + ")" });
   const rows = w.summaryRows || [];
   if (rows.length && rows.every(r => r.batch === "—")) flags.push({ key: "synthesized", label: "Category rows guessed from line items" });
+  const anomalies = (w.lineItems || []).filter(li => isAnomalousAmount(li.amount, vendorMedianCache[li.vendor]));
+  if (anomalies.length) flags.push({ key: "anomaly", label: anomalies.length + " invoice" + (anomalies.length === 1 ? "" : "s") + " unusually large for vendor" });
   return flags;
 }
 function computeNeedsReview(ws){
@@ -587,7 +672,7 @@ function computeNeedsReview(ws){
  * App state — backed by this server's /api/warrants, not a platform
  * capability. There's no live subscription: every save just refetches.
  * ---------------------------------------------------------------- */
-const state = { warrants: new Map(), ready: false, extractionEnabled: false, budgets: {} };
+const state = { warrants: new Map(), ready: false, extractionEnabled: false, budgets: {}, taxonomy: { rules: [] }, vendorAliases: [] };
 let catSort = "amount";
 let vendorSort = "amount";
 let warrantSort = { key: "dateISO", dir: "desc" };
@@ -642,6 +727,26 @@ function initResizers(){
   });
 }
 
+async function loadTaxonomy(){
+  try {
+    const res = await fetch("/api/taxonomy");
+    const data = await res.json();
+    state.taxonomy = { rules: Array.isArray(data.rules) ? data.rules : [] };
+  } catch (e) {
+    state.taxonomy = { rules: [] };
+  }
+  CATEGORIES = state.taxonomy.rules.map(r => r.name);
+}
+async function loadVendorAliases(){
+  try {
+    const res = await fetch("/api/vendor-aliases");
+    const data = await res.json();
+    state.vendorAliases = Array.isArray(data.aliases) ? data.aliases : [];
+  } catch (e) {
+    state.vendorAliases = [];
+  }
+}
+
 async function loadWarrants(){
   const res = await fetch("/api/warrants");
   const list = await res.json();
@@ -664,6 +769,8 @@ async function initApp(){
     banner.innerHTML = "No ANTHROPIC_API_KEY is set on the server, so new uploads are disabled — add it to .env and restart the container. The saved ledger below still works.";
     $("#uploadBtn").disabled = true;
   }
+  await loadTaxonomy();
+  await loadVendorAliases();
   await loadBudgets();
   await loadWarrants();
 }
@@ -672,6 +779,7 @@ async function initApp(){
  * Rendering
  * ---------------------------------------------------------------- */
 function renderAll(){
+  vendorMedianCache = vendorMedianAmounts(allWarrants());
   renderStats();
   renderCategoryPanel();
   renderVendorPanel($("#vendorSearch").value || "");
@@ -998,6 +1106,11 @@ function openDetail(id){
     html += '<div style="margin-bottom:14px"><span class="badge warn" title="Invoices on this warrant flagged as exceeding their purchase order.">' +
       poFlagged.length + ' invoice' + (poFlagged.length === 1 ? "" : "s") + ' exceeded PO by ' + fmtMoney(poTotal) + '</span></div>';
   }
+  const anomalyFlagged = (w.lineItems || []).filter(li => isAnomalousAmount(li.amount, vendorMedianCache[li.vendor]));
+  if (anomalyFlagged.length) {
+    html += '<div style="margin-bottom:14px"><span class="badge warn" title="Line items unusually large relative to that vendor\'s own history on file — ' + ANOMALY_MULTIPLE + 'x or more its typical amount.">' +
+      anomalyFlagged.length + ' invoice' + (anomalyFlagged.length === 1 ? "" : "s") + ' unusually large for vendor</span></div>';
+  }
   html += '<h3 style="font-size:13.5px;margin-bottom:8px">By category</h3>';
   html += cats.length
     ? '<table class="mini-table">' + cats.map(([k, v]) => '<tr><td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>').join("") + '</table>'
@@ -1088,6 +1201,7 @@ function openVendorDetail(name){
     ? fmtMoney(total) + " across " + rows.length + " line item" + (rows.length === 1 ? "" : "s")
     : "No line-item detail saved for this vendor";
 
+  const medianInfo = vendorMedianCache[name];
   $("#vdDetailBody").innerHTML = rows.length ? rows.map(({ w, r }) => (
     '<tr>' +
       '<td class="mono">' + escapeHtml(w.label || isoToLabel(w.dateISO)) + '</td>' +
@@ -1095,11 +1209,12 @@ function openVendorDetail(name){
       '<td>' + escapeHtml(r.description || "—") + '</td>' +
       '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td>' +
       '<td style="text-align:right" class="mono">' + (Number(r.exceedsPoBy) > 0 ? '<span class="badge warn">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td>' +
+      '<td style="text-align:right">' + (isAnomalousAmount(r.amount, medianInfo) ? '<span class="badge warn" title="' + ANOMALY_MULTIPLE + 'x or more this vendor\'s typical amount">large</span>' : '—') + '</td>' +
       '<td>' + (w.hasSourcePdf
         ? '<a class="btn small" style="text-decoration:none" href="/api/warrants/' + encodeURIComponent(w.id) + '/source" target="_blank" rel="noopener" title="Opens the original bill schedule PDF this line item came from.">View PDF</a>'
         : '') + '</td>' +
     '</tr>'
-  )).join("") : '<tr><td colspan="6" style="text-align:center;color:var(--ink-dim);padding:16px 0">This vendor’s total comes from warrants saved before per-line-item detail was kept — only the aggregate total is available for those.</td></tr>';
+  )).join("") : '<tr><td colspan="7" style="text-align:center;color:var(--ink-dim);padding:16px 0">This vendor’s total comes from warrants saved before per-line-item detail was kept — only the aggregate total is available for those.</td></tr>';
 
   $("#vendorDetailModal").hidden = false;
 }
@@ -1486,12 +1601,14 @@ function renderReviewRows(){
   )).join("") : '<tr><td colspan="5" style="text-align:center;color:var(--ink-dim)">No batch-summary rows were found on the scanned pages.</td></tr>';
 
   const lBody = $("#rvLineRows");
-  lBody.innerHTML = reviewCtx.lineItems.length ? reviewCtx.lineItems.map((r, i) => (
-    '<tr><td class="ex"><input type="checkbox" ' + (r.include ? "checked" : "") + ' data-lrow="' + i + '"></td>' +
+  lBody.innerHTML = reviewCtx.lineItems.length ? reviewCtx.lineItems.map((r, i) => {
+    const anomalous = isAnomalousAmount(r.amount, vendorMedianCache[normalizeVendor(r.vendor)]);
+    return '<tr><td class="ex"><input type="checkbox" ' + (r.include ? "checked" : "") + ' data-lrow="' + i + '"></td>' +
     '<td>' + escapeHtml(r.vendor) + '</td><td>' + escapeHtml(r.description) + '</td>' +
     '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td>' +
-    '<td style="text-align:right" class="mono">' + (r.exceedsPoBy > 0 ? '<span class="badge warn" title="Flagged as exceeding its purchase order">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td></tr>'
-  )).join("") : '<tr><td colspan="5" style="text-align:center;color:var(--ink-dim)">No vendor line items were found on the scanned pages.</td></tr>';
+    '<td style="text-align:right" class="mono">' + (r.exceedsPoBy > 0 ? '<span class="badge warn" title="Flagged as exceeding its purchase order">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td>' +
+    '<td style="text-align:right">' + (anomalous ? '<span class="badge warn" title="Unusually large relative to this vendor\'s history on file">large</span>' : '—') + '</td></tr>';
+  }).join("") : '<tr><td colspan="6" style="text-align:center;color:var(--ink-dim)">No vendor line items were found on the scanned pages.</td></tr>';
 
   $$("input[data-srow]", sBody).forEach(cb => cb.addEventListener("change", () => { reviewCtx.summaryRows[+cb.dataset.srow].include = cb.checked; updateReconBadge(); }));
   $$("select[data-scat]", sBody).forEach(sel => sel.addEventListener("change", () => { reviewCtx.summaryRows[+sel.dataset.scat].category = sel.value; }));
@@ -1660,6 +1777,125 @@ $("#backupsBody").addEventListener("click", async (e) => {
     await renderBackups();
   } catch (e2) {
     toast("Couldn't delete that backup.", "bad");
+  }
+});
+
+/* ---------------------------------------------------------------- *
+ * Settings — the category taxonomy and vendor alias list, editable here
+ * instead of requiring a code change + redeploy. Edits happen in a draft
+ * copy (taxonomyDraft/aliasesDraft) and are only sent to the server (as two
+ * whole-object-replace PUTs, same pattern as budgets) on Save; Cancel just
+ * discards the draft.
+ * ---------------------------------------------------------------- */
+let taxonomyDraft = [];
+let aliasesDraft = [];
+
+function openSettings(){
+  taxonomyDraft = state.taxonomy.rules.map(r => ({ name: r.name, groupsText: groupsToText(r.groups), isDefault: Boolean(r.isDefault) }));
+  aliasesDraft = state.vendorAliases.map(a => ({ canonical: a.canonical, triggersText: (a.triggers || []).join(", ") }));
+  renderTaxRows();
+  renderAliasRows();
+  $("#settingsModal").hidden = false;
+}
+function closeSettings(){
+  $("#settingsModal").hidden = true;
+}
+$("#settingsBtn").addEventListener("click", openSettings);
+$("#settingsClose").addEventListener("click", closeSettings);
+$("#settingsCancel").addEventListener("click", closeSettings);
+$("#settingsModal").addEventListener("click", (e) => { if (e.target.id === "settingsModal") closeSettings(); });
+
+function renderTaxRows(){
+  const body = $("#taxRows");
+  body.innerHTML = taxonomyDraft.map((r, i) => (
+    '<tr>' +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn small" data-tax-up="' + i + '" title="Move up"' + (i === 0 ? " disabled" : "") + '>↑</button> ' +
+        '<button class="btn small" data-tax-down="' + i + '" title="Move down"' + (i === taxonomyDraft.length - 1 ? " disabled" : "") + '>↓</button>' +
+      '</td>' +
+      '<td><input type="text" data-tax-name="' + i + '" value="' + escapeHtml(r.name) + '" style="width:100%"></td>' +
+      '<td><input type="text" data-tax-groups="' + i + '" value="' + escapeHtml(r.groupsText) + '" style="width:100%" placeholder="e.g. special education + transport, bus fee"></td>' +
+      '<td style="text-align:center"><input type="radio" name="taxDefault" data-tax-default="' + i + '"' + (r.isDefault ? " checked" : "") + '></td>' +
+      '<td><button class="btn small" data-tax-del="' + i + '" title="Delete this category">✕</button></td>' +
+    '</tr>'
+  )).join("");
+}
+$("#taxRows").addEventListener("input", (e) => {
+  const nameInput = e.target.closest("[data-tax-name]");
+  if (nameInput) taxonomyDraft[+nameInput.dataset.taxName].name = nameInput.value;
+  const groupsInput = e.target.closest("[data-tax-groups]");
+  if (groupsInput) taxonomyDraft[+groupsInput.dataset.taxGroups].groupsText = groupsInput.value;
+});
+$("#taxRows").addEventListener("change", (e) => {
+  const def = e.target.closest("[data-tax-default]");
+  if (def) taxonomyDraft.forEach((r, i) => { r.isDefault = (i === +def.dataset.taxDefault); });
+});
+$("#taxRows").addEventListener("click", (e) => {
+  const up = e.target.closest("[data-tax-up]");
+  const down = e.target.closest("[data-tax-down]");
+  const del = e.target.closest("[data-tax-del]");
+  if (up) {
+    const i = +up.dataset.taxUp;
+    if (i > 0) { [taxonomyDraft[i - 1], taxonomyDraft[i]] = [taxonomyDraft[i], taxonomyDraft[i - 1]]; renderTaxRows(); }
+  } else if (down) {
+    const i = +down.dataset.taxDown;
+    if (i < taxonomyDraft.length - 1) { [taxonomyDraft[i + 1], taxonomyDraft[i]] = [taxonomyDraft[i], taxonomyDraft[i + 1]]; renderTaxRows(); }
+  } else if (del) {
+    taxonomyDraft.splice(+del.dataset.taxDel, 1);
+    renderTaxRows();
+  }
+});
+$("#addCategoryBtn").addEventListener("click", () => { taxonomyDraft.push({ name: "", groupsText: "", isDefault: false }); renderTaxRows(); });
+
+function renderAliasRows(){
+  const body = $("#aliasRows");
+  body.innerHTML = aliasesDraft.map((a, i) => (
+    '<tr>' +
+      '<td><input type="text" data-alias-name="' + i + '" value="' + escapeHtml(a.canonical) + '" style="width:100%"></td>' +
+      '<td><input type="text" data-alias-triggers="' + i + '" value="' + escapeHtml(a.triggersText) + '" style="width:100%" placeholder="e.g. amazon, amzn"></td>' +
+      '<td><button class="btn small" data-alias-del="' + i + '" title="Delete this alias">✕</button></td>' +
+    '</tr>'
+  )).join("");
+}
+$("#aliasRows").addEventListener("input", (e) => {
+  const nameInput = e.target.closest("[data-alias-name]");
+  if (nameInput) aliasesDraft[+nameInput.dataset.aliasName].canonical = nameInput.value;
+  const triggersInput = e.target.closest("[data-alias-triggers]");
+  if (triggersInput) aliasesDraft[+triggersInput.dataset.aliasTriggers].triggersText = triggersInput.value;
+});
+$("#aliasRows").addEventListener("click", (e) => {
+  const del = e.target.closest("[data-alias-del]");
+  if (del) { aliasesDraft.splice(+del.dataset.aliasDel, 1); renderAliasRows(); }
+});
+$("#addAliasBtn").addEventListener("click", () => { aliasesDraft.push({ canonical: "", triggersText: "" }); renderAliasRows(); });
+
+$("#settingsSave").addEventListener("click", async () => {
+  const rules = taxonomyDraft
+    .map(r => ({ name: r.name.trim(), groups: parseGroupsText(r.groupsText), isDefault: Boolean(r.isDefault) }))
+    .filter(r => r.name);
+  if (!rules.length) { toast("Add at least one category.", "bad"); return; }
+  if (rules.filter(r => r.isDefault).length !== 1) { toast("Pick exactly one default category.", "bad"); return; }
+  const seenNames = new Set();
+  for (const r of rules) {
+    const key = r.name.toLowerCase();
+    if (seenNames.has(key)) { toast('Category names must be unique — "' + r.name + '" is repeated.', "bad"); return; }
+    seenNames.add(key);
+  }
+  const aliases = aliasesDraft
+    .map(a => ({ canonical: a.canonical.trim(), triggers: String(a.triggersText || "").split(",").map(t => t.trim()).filter(Boolean) }))
+    .filter(a => a.canonical && a.triggers.length);
+  try {
+    let res = await fetch("/api/taxonomy", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ rules }) });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "save failed");
+    res = await fetch("/api/vendor-aliases", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ aliases }) });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "save failed");
+    await loadTaxonomy();
+    await loadVendorAliases();
+    renderAll();
+    closeSettings();
+    toast("Settings saved.", "good");
+  } catch (e) {
+    toast("Couldn't save settings — " + (e && e.message ? e.message : "try again."), "bad");
   }
 });
 
