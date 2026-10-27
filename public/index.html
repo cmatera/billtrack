@@ -1,0 +1,987 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sutton Bill Ledger</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+/* Ledger layout: sticky top bar (brand + upload), a stat strip, a two-column
+   split (category ledger | vendor ledger) that stacks to one column on
+   phones, a warrant register table below, and modals as centered sheets for
+   the review / detail / upload-progress flows. */
+:root{
+  --bg:#F3F5F7; --surface:#FFFFFF; --surface-2:#EAEEF1; --surface-3:#DEE5EA;
+  --ink:#1B232E; --ink-dim:#5B6672; --line:#D7DEE4;
+  --accent:#1F6F63; --accent-ink:#FFFFFF; --accent-soft:#E3EFEC;
+  --good:#2F7A4F; --good-soft:#E6F2EA; --warn:#B9802E; --warn-soft:#FBF0DE; --bad:#B23B3B; --bad-soft:#FBE8E7;
+  --font-display:"Archivo",system-ui,sans-serif; --font-body:"Public Sans",system-ui,sans-serif; --font-mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --bg:#11151B; --surface:#181D25; --surface-2:#1F2530; --surface-3:#272F3B;
+    --ink:#E6EAEE; --ink-dim:#9AA6B2; --line:#2B333E;
+    --accent:#4FAFA0; --accent-ink:#0B1310; --accent-soft:#1B2B28;
+    --good:#55C27E; --good-soft:#163523; --warn:#E0A94C; --warn-soft:#352A14; --bad:#E26B6B; --bad-soft:#391C1C;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#11151B; --surface:#181D25; --surface-2:#1F2530; --surface-3:#272F3B;
+  --ink:#E6EAEE; --ink-dim:#9AA6B2; --line:#2B333E;
+  --accent:#4FAFA0; --accent-ink:#0B1310; --accent-soft:#1B2B28;
+  --good:#55C27E; --good-soft:#163523; --warn:#E0A94C; --warn-soft:#352A14; --bad:#E26B6B; --bad-soft:#391C1C;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);line-height:1.45}
+.gutter{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+h1,h2,h3{font-family:var(--font-display);margin:0;text-wrap:balance}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.topbar{position:sticky;top:0;z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.topbar-inner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding-block:14px;max-width:1180px;margin:0 auto}
+.brand{display:flex;align-items:baseline;gap:10px;min-width:0}
+.brand .mark{width:30px;height:30px;border-radius:7px;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:800;font-size:15px;flex:none}
+.brand h1{font-size:19px;font-weight:800;letter-spacing:-0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand .sub{font-size:12.5px;color:var(--ink-dim);white-space:nowrap;display:none}
+@media (min-width:640px){.brand .sub{display:inline}}
+.btn{font-family:var(--font-body);font-weight:600;font-size:13.5px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:9px 14px;cursor:pointer;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.btn:hover{border-color:var(--ink-dim)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.primary:hover{filter:brightness(1.05)}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.danger{color:var(--bad);border-color:var(--bad-soft)}
+.btn.small{padding:6px 10px;font-size:12.5px}
+main{max-width:1180px;margin:0 auto;padding-block:22px 60px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+@media (max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
+.stat .label{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-dim);font-weight:600}
+.stat .value{font-family:var(--font-display);font-size:24px;font-weight:800;margin-top:4px;letter-spacing:-0.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stat .foot{font-size:12px;color:var(--ink-dim);margin-top:2px}
+.split{display:grid;grid-template-columns:1.1fr 1fr;gap:16px;margin-bottom:20px}
+@media (max-width:860px){.split{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+.panel-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:12px}
+.panel-head h2{font-size:15.5px}
+.panel-head .hint{font-size:11.5px;color:var(--ink-dim)}
+.bar-row{display:grid;grid-template-columns:150px 1fr auto 46px;gap:10px;align-items:center;padding:6px 0}
+.bar-row .name{font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-track{position:relative;height:9px;background:var(--surface-2);border-radius:5px;overflow:hidden}
+.bar-fill{position:absolute;inset:0;width:0;background:var(--accent);border-radius:5px;transition:width .4s ease}
+.bar-row .amt{font-family:var(--font-mono);font-size:12.5px;font-variant-numeric:tabular-nums;text-align:right;min-width:78px}
+.bar-row .pct{font-family:var(--font-mono);font-size:11px;color:var(--ink-dim);text-align:right}
+.seg{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;flex:none}
+.seg-btn{font-family:var(--font-body);font-size:11px;font-weight:600;padding:4px 9px;border:none;background:var(--surface);color:var(--ink-dim);cursor:pointer}
+.seg-btn.active{background:var(--accent-soft);color:var(--accent)}
+.seg-btn+.seg-btn{border-left:1px solid var(--line)}
+.th-sort{background:none;border:none;padding:0;margin:0;font:inherit;text-transform:inherit;letter-spacing:inherit;color:inherit;cursor:pointer;white-space:nowrap}
+.th-sort:hover{color:var(--ink)}
+.col-head{display:grid;gap:10px;align-items:center;padding:2px 0 8px;margin-bottom:6px;border-bottom:1px solid var(--line)}
+.col-head.bar{grid-template-columns:150px 1fr auto 46px}
+.col-head.vendor{grid-template-columns:1fr auto 46px}
+.col-sort{background:none;border:none;padding:0;margin:0;font-family:var(--font-body);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink-dim);cursor:pointer;text-align:left;white-space:nowrap}
+.col-sort:hover{color:var(--ink)}
+.col-sort.right{text-align:right}
+.col-head-cell{position:relative;display:inline-flex;align-items:center;min-width:0;width:100%}
+.col-resizer{position:absolute;top:-6px;bottom:-6px;right:-10px;width:14px;cursor:col-resize;touch-action:none;z-index:2}
+.col-resizer::before{content:"";position:absolute;top:2px;bottom:2px;left:6px;width:2px;background:var(--line);border-radius:1px}
+.col-resizer:hover::before,.col-resizer.active::before{background:var(--accent)}
+#categoryPanel .col-head.bar,#categoryPanel .bar-row{grid-template-columns:var(--cat-name-w,150px) 1fr auto 46px}
+#vendorPanel .col-head.vendor,#vendorPanel .vendor-row{grid-template-columns:var(--vendor-name-w,220px) auto 46px}
+.empty{padding:22px 4px;text-align:center;color:var(--ink-dim);font-size:13px}
+.empty b{display:block;color:var(--ink);font-family:var(--font-display);font-size:14.5px;margin-bottom:4px;font-weight:700}
+.search{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--ink);font-size:13px;font-family:var(--font-body);margin-bottom:10px}
+.search:focus{outline:2px solid var(--accent);outline-offset:1px}
+.vendor-row{display:grid;grid-template-columns:1fr auto 46px;gap:10px;align-items:center;padding:7px 0;border-top:1px solid var(--line)}
+.vendor-row:first-child{border-top:none}
+.vendor-row .nm{font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vendor-row .nm .pill{display:inline-block;margin-left:6px;font-size:10.5px;padding:1px 6px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:600;vertical-align:1px}
+.vendor-row .amt{font-family:var(--font-mono);font-size:13px;white-space:nowrap;text-align:right}
+.vendor-row .pct{font-family:var(--font-mono);font-size:11px;color:var(--ink-dim);text-align:right}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{position:relative;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-dim);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--surface-2)}
+.num{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;padding:3px 8px;border-radius:999px}
+.badge.good{background:var(--good-soft);color:var(--good)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.bad{background:var(--bad-soft);color:var(--bad)}
+.badge.neutral{background:var(--surface-2);color:var(--ink-dim)}
+.banner{display:flex;gap:10px;align-items:flex-start;background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px}
+.banner.info{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+[hidden]{display:none!important}
+.overlay{position:fixed;inset:0;background:rgba(10,13,17,.55);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
+.sheet{background:var(--surface);border-radius:14px;max-width:560px;width:100%;padding:22px;box-shadow:0 20px 50px rgba(0,0,0,.25)}
+.sheet.wide{max-width:720px}
+.sheet h3{font-size:17px;margin-bottom:4px}
+.sheet .desc{font-size:13px;color:var(--ink-dim);margin-bottom:16px}
+.progress-track{height:8px;background:var(--surface-2);border-radius:5px;overflow:hidden;margin:14px 0 8px}
+.progress-fill{height:100%;width:8%;background:var(--accent);border-radius:5px;transition:width .3s ease}
+.progress-note{font-size:12.5px;color:var(--ink-dim);font-family:var(--font-mono)}
+.modal{position:fixed;inset:0;background:rgba(10,13,17,.55);display:flex;align-items:flex-start;justify-content:center;z-index:50;overflow-y:auto;padding:24px 16px}
+.modal-card{background:var(--surface);border-radius:14px;max-width:760px;width:100%;margin-top:0;box-shadow:0 20px 50px rgba(0,0,0,.25)}
+.modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:20px 22px 8px}
+.modal-head h3{font-size:18px}
+.modal-head .x{background:none;border:none;color:var(--ink-dim);font-size:20px;cursor:pointer;line-height:1;padding:2px 6px}
+.modal-body{padding:4px 22px 22px}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 22px 22px;border-top:1px solid var(--line);margin-top:12px}
+.field-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+@media (max-width:560px){.field-row{grid-template-columns:1fr 1fr}}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-dim);font-weight:600}
+.field input,.field select{font-family:var(--font-mono);font-size:13.5px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--ink)}
+.field select{font-family:var(--font-body)}
+.mini-table{width:100%;font-size:12.5px;border-collapse:collapse}
+.mini-table th{font-size:10.5px;padding:6px 8px}
+.mini-table td{padding:6px 8px}
+.mini-table select{font-size:12px;padding:3px 5px;border:1px solid var(--line);border-radius:6px;background:var(--surface-2);color:var(--ink);font-family:var(--font-body);max-width:190px}
+.mini-table .ex{width:28px;text-align:center}
+.scroll-box{max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:8px}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);font-size:13px;padding:10px 18px;border-radius:999px;z-index:60;max-width:90vw;box-shadow:0 10px 30px rgba(0,0,0,.3)}
+.toast.bad{background:var(--bad)}
+.toast.good{background:var(--good)}
+.footer-note{font-size:11.5px;color:var(--ink-dim);text-align:center;margin-top:10px}
+.quality-tag{font-size:10px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;color:var(--ink-dim)}
+</style>
+</head>
+<body>
+
+<div class="topbar gutter">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="mark">SB</div>
+      <div style="min-width:0">
+        <h1>Sutton Bill Ledger</h1>
+      </div>
+      <span class="sub">School Committee bill schedules, by category &amp; vendor</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn ghost small" id="exportBtn" title="Export category &amp; vendor totals as CSV">Export CSV</button>
+      <button class="btn primary" id="uploadBtn">Upload bill schedule</button>
+      <input type="file" id="fileInput" accept="application/pdf" multiple hidden>
+    </div>
+  </div>
+</div>
+
+<main class="gutter">
+  <div id="capBanner" class="banner" hidden></div>
+
+  <section class="stats" id="statGrid">
+    <div class="stat"><div class="label">Total tracked</div><div class="value mono" id="statTotal">—</div><div class="foot" id="statTotalFoot">&nbsp;</div></div>
+    <div class="stat"><div class="label">Warrants on file</div><div class="value mono" id="statCount">—</div><div class="foot">of 20 to date</div></div>
+    <div class="stat"><div class="label">Top vendor</div><div class="value" id="statTopVendor" style="font-size:16px;font-family:var(--font-display);font-weight:700">—</div><div class="foot" id="statTopVendorFoot">&nbsp;</div></div>
+    <div class="stat"><div class="label">Top category</div><div class="value" id="statTopCat" style="font-size:16px;font-family:var(--font-display);font-weight:700">—</div><div class="foot" id="statTopCatFoot">&nbsp;</div></div>
+  </section>
+
+  <section class="split">
+    <div class="panel" id="categoryPanel">
+      <div class="panel-head"><h2>Spending by category</h2><span class="hint" id="categoryHint"></span></div>
+      <div class="col-head bar">
+        <span class="col-head-cell"><button class="col-sort" data-key="name" data-label="Category" title="Sutton's 13-category spending taxonomy, applied to each batch-summary row. Drag the edge to resize.">Category</button><span class="col-resizer" data-resize="cat-name"></span></span>
+        <span></span>
+        <button class="col-sort right" data-key="amount" data-label="Amount" title="Total dollars tracked in this category across every warrant on file.">Amount</button>
+        <button class="col-sort right" data-key="amount" data-label="%" title="This category's amount as a share of total spend across every warrant on file.">%</button>
+      </div>
+      <div id="categoryBody"></div>
+    </div>
+    <div class="panel" id="vendorPanel">
+      <div class="panel-head"><h2>Spending by vendor</h2><span class="hint" id="vendorHint"></span></div>
+      <input class="search" id="vendorSearch" placeholder="Search vendors (e.g. Amazon, Whitewater)…">
+      <div class="col-head vendor" style="padding:2px 10px 8px">
+        <span class="col-head-cell"><button class="col-sort" data-key="name" data-label="Vendor" title="Vendor name, normalized (e.g. Amazon Capital Services, Whitewater, Inc.). Drag the edge to resize.">Vendor</button><span class="col-resizer" data-resize="vendor-name"></span></span>
+        <button class="col-sort right" data-key="amount" data-label="Amount" title="Total dollars paid to this vendor across every warrant on file.">Amount</button>
+        <button class="col-sort right" data-key="amount" data-label="%" title="This vendor's amount as a share of total spend across every warrant on file.">%</button>
+      </div>
+      <div class="scroll-box"><div id="vendorBody" style="padding:4px 10px"></div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Warrant register</h2><span class="hint">Click a row for its full breakdown</span></div>
+    <div class="table-wrap">
+      <table id="warrantTable" style="table-layout:fixed">
+        <colgroup>
+          <col style="width:96px"><col style="width:48px"><col style="width:112px"><col style="width:92px"><col style="width:84px"><col style="width:130px"><col style="width:160px">
+        </colgroup>
+        <thead><tr>
+          <th><button class="th-sort" data-key="dateISO" data-label="Date" title="Warrant / school committee meeting date.">Date</button><span class="col-resizer" data-col="0"></span></th>
+          <th><button class="th-sort" data-key="warrantNo" data-label="#" title="Warrant number, in the committee's continuous numbering.">#</button><span class="col-resizer" data-col="1"></span></th>
+          <th style="text-align:right"><button class="th-sort" data-key="total" data-label="Total" title="Total dollar amount stated on the warrant's cover page.">Total</button><span class="col-resizer" data-col="2"></span></th>
+          <th style="text-align:right" title="This warrant's total as a share of all warrants on file.">% of total<span class="col-resizer" data-col="3"></span></th>
+          <th style="text-align:right"><button class="th-sort" data-key="invoiceCount" data-label="Invoices" title="Number of individual invoices on this warrant.">Invoices</button><span class="col-resizer" data-col="4"></span></th>
+          <th><button class="th-sort" data-key="reconciled" data-label="Reconciled" title="Whether the batch-summary rows add up to the stated cover total, within 2¢.">Reconciled</button><span class="col-resizer" data-col="5"></span></th>
+          <th><button class="th-sort" data-key="quality" data-label="Quality" title="How this warrant's data was collected: full detail (uploaded here) vs. legacy (seeded from the committee's prior review).">Quality</button><span class="col-resizer" data-col="6"></span></th>
+        </tr></thead>
+        <tbody id="warrantRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="footer-note">Historical warrants (#04–#23) were seeded from the committee's existing review; totals and Amazon figures are confirmed, but full per-vendor and per-category detail only exists for warrants re-processed through the upload tool above.</p>
+</main>
+
+<!-- Upload progress overlay -->
+<div class="overlay" id="progressOverlay" hidden>
+  <div class="sheet">
+    <h3 id="progressTitle">Reading bill schedule…</h3>
+    <div class="desc" id="progressFile">&nbsp;</div>
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-note" id="progressNote">Starting…</div>
+    <div style="margin-top:16px;text-align:right">
+      <button class="btn small" id="progressCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Review modal -->
+<div class="modal" id="reviewModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <div>
+        <h3>Review before saving</h3>
+        <div class="desc" id="reviewFileName" style="margin-top:2px"></div>
+      </div>
+      <button class="x" id="reviewClose" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="dupBanner" class="banner" hidden></div>
+      <div class="field-row">
+        <div class="field"><label>Warrant date</label><input id="rvDate" type="date"></div>
+        <div class="field"><label>Warrant #</label><input id="rvNo" type="text" placeholder="e.g. 24"></div>
+        <div class="field"><label>Stated total</label><input id="rvTotal" type="number" step="0.01"></div>
+      </div>
+      <div id="reconBadgeWrap" style="margin-bottom:14px"></div>
+
+      <h3 style="font-size:14px;margin-bottom:8px">Batch summary → category (uncheck to exclude a row)</h3>
+      <div class="scroll-box" style="margin-bottom:16px">
+        <table class="mini-table">
+          <thead><tr><th class="ex"></th><th>Batch</th><th>Department (as read)</th><th>Category</th><th style="text-align:right">Amount</th></tr></thead>
+          <tbody id="rvSummaryRows"></tbody>
+        </table>
+      </div>
+
+      <h3 style="font-size:14px;margin-bottom:8px">Vendor line items found (uncheck to exclude)</h3>
+      <div class="scroll-box">
+        <table class="mini-table">
+          <thead><tr><th class="ex"></th><th>Vendor</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead>
+          <tbody id="rvLineRows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="reviewCancel">Cancel</button>
+      <button class="btn primary" id="reviewSave">Save to ledger</button>
+    </div>
+  </div>
+</div>
+
+<!-- Warrant detail modal -->
+<div class="modal" id="detailModal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <div><h3 id="dtTitle">Warrant</h3><div class="desc" id="dtSub"></div></div>
+      <button class="x" id="detailClose" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body" id="detailBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+
+function fmtMoney(n){
+  if (n === null || n === undefined || isNaN(n)) return "—";
+  const neg = n < 0;
+  const v = Math.abs(n).toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
+  return (neg ? "-$" : "$") + v;
+}
+function round2(n){ return Math.round((Number(n)||0) * 100) / 100; }
+function escapeHtml(s){
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function toast(msg, kind){
+  const el = $("#toast");
+  el.textContent = msg;
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.hidden = true; }, 4200);
+}
+
+/* ---------------------------------------------------------------- *
+ * The 13-category taxonomy used throughout the committee's review,
+ * applied deterministically so every upload is categorized the same
+ * way. Order matters: more specific checks run before general ones.
+ * ---------------------------------------------------------------- */
+const CATEGORIES = [
+  "Special Education — Tuition & Services",
+  "Special Education — Transportation",
+  "Transportation — General (Contracted)",
+  "Maintenance & Facilities",
+  "Capital Projects",
+  "Utilities",
+  "Technology",
+  "Athletics",
+  "Food Services",
+  "Administration",
+  "Curriculum / Instructional",
+  "Health",
+  "Extracurricular & Revolving Funds",
+];
+
+function categorize(rawLabel){
+  const s = String(rawLabel || "").toLowerCase();
+  const has = (...terms) => terms.some(t => s.includes(t));
+  if (has("special education") && has("transport")) return "Special Education — Transportation";
+  if (has("special education")) return "Special Education — Tuition & Services";
+  if (has("transport") || has("bus fee")) return "Transportation — General (Contracted)";
+  if (has("maintenance") || has("facility") || has("facilities")) return "Maintenance & Facilities";
+  if (has("capital")) return "Capital Projects";
+  if (has("utilit")) return "Utilities";
+  if (has("technology") || has("software")) return "Technology";
+  if (has("athletic")) return "Athletics";
+  if (has("food service")) return "Food Services";
+  if (has("admin") || has("tuition reimbursement")) return "Administration";
+  if (has("early learning") || has("elementary") || has("middle school") || has("high school") || has("library")) return "Curriculum / Instructional";
+  if (has("health")) return "Health";
+  return "Extracurricular & Revolving Funds";
+}
+
+const VENDOR_ALIASES = [
+  [/\bamazon\b|^amzn/i, "Amazon Capital Services"],
+  [/whitewater/i, "Whitewater, Inc."],
+  [/spencer meadow/i, "Spencer Meadow Solar"],
+  [/evergreen center/i, "Evergreen Center"],
+  [/great minds/i, "Great Minds PBC"],
+  [/aa transportation/i, "AA Transportation"],
+  [/national grid/i, "National Grid"],
+  [/rfk community/i, "RFK Community Alliance"],
+];
+function normalizeVendor(raw){
+  let s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s) return "Unknown vendor";
+  for (const [re, canon] of VENDOR_ALIASES) if (re.test(s)) return canon;
+  return s;
+}
+
+function mmddyyyyToISO(s){
+  const m = String(s || "").match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (!m) return null;
+  let [, mo, da, yr] = m;
+  if (yr.length === 2) yr = "20" + yr;
+  return yr + "-" + mo.padStart(2, "0") + "-" + da.padStart(2, "0");
+}
+function isoToLabel(iso){
+  if (!iso) return "—";
+  const [y, m, d] = iso.split("-");
+  return m + "/" + d + "/" + y.slice(2);
+}
+
+/* ---------------------------------------------------------------- *
+ * App state — backed by this server's /api/warrants, not a platform
+ * capability. There's no live subscription: every save just refetches.
+ * ---------------------------------------------------------------- */
+const state = { warrants: new Map(), ready: false, extractionEnabled: false };
+let catSort = "amount";
+let vendorSort = "amount";
+let warrantSort = { key: "dateISO", dir: "desc" };
+
+function wireColResize(handle, getW, setW, min, max){
+  if (!handle) return;
+  let startX = 0, startW = 0;
+  const onMove = (e) => {
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    const w = Math.max(min, Math.min(max, startW + (x - startX)));
+    setW(w);
+  };
+  const stop = () => {
+    handle.classList.remove("active");
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", stop);
+    document.removeEventListener("touchmove", onMove);
+    document.removeEventListener("touchend", stop);
+    document.body.style.cursor = "";
+  };
+  const start = (e) => {
+    e.preventDefault();
+    handle.classList.add("active");
+    startX = e.touches ? e.touches[0].clientX : e.clientX;
+    startW = getW();
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", stop);
+    document.addEventListener("touchmove", onMove, { passive: false });
+    document.addEventListener("touchend", stop);
+    document.body.style.cursor = "col-resize";
+  };
+  handle.addEventListener("mousedown", start);
+  handle.addEventListener("touchstart", start, { passive: false });
+}
+
+function initResizers(){
+  let catNameW = 150, vendorNameW = 220;
+  wireColResize($('[data-resize="cat-name"]'),
+    () => catNameW,
+    (w) => { catNameW = w; $("#categoryPanel").style.setProperty("--cat-name-w", w + "px"); },
+    90, 320);
+  wireColResize($('[data-resize="vendor-name"]'),
+    () => vendorNameW,
+    (w) => { vendorNameW = w; $("#vendorPanel").style.setProperty("--vendor-name-w", w + "px"); },
+    120, 420);
+  const cols = $$("#warrantTable col");
+  $$(".col-resizer[data-col]").forEach(handle => {
+    const idx = +handle.dataset.col;
+    const col = cols[idx];
+    if (!col) return;
+    wireColResize(handle, () => col.getBoundingClientRect().width, (w) => { col.style.width = Math.max(40, w) + "px"; }, 40, 480);
+  });
+}
+
+async function loadWarrants(){
+  const res = await fetch("/api/warrants");
+  const list = await res.json();
+  state.warrants = new Map(list.map(w => [w.id, w]));
+  state.ready = true;
+  renderAll();
+}
+
+async function initApp(){
+  try {
+    const cfg = await fetch("/api/config").then(r => r.json());
+    state.extractionEnabled = Boolean(cfg.extractionEnabled);
+  } catch (e) {
+    state.extractionEnabled = false;
+  }
+  const banner = $("#capBanner");
+  if (!state.extractionEnabled) {
+    banner.hidden = false;
+    banner.className = "banner info";
+    banner.innerHTML = "No ANTHROPIC_API_KEY is set on the server, so new uploads are disabled — add it to .env and restart the container. The saved ledger below still works.";
+    $("#uploadBtn").disabled = true;
+  }
+  await loadWarrants();
+}
+
+/* ---------------------------------------------------------------- *
+ * Rendering
+ * ---------------------------------------------------------------- */
+function renderAll(){
+  renderStats();
+  renderCategoryPanel();
+  renderVendorPanel($("#vendorSearch").value || "");
+  renderWarrantTable();
+}
+
+function allWarrants(){ return Array.from(state.warrants.values()); }
+
+function renderStats(){
+  const ws = allWarrants();
+  const total = ws.reduce((s, w) => s + (Number(w.total) || 0), 0);
+  $("#statTotal").textContent = ws.length ? fmtMoney(total) : "—";
+  $("#statTotalFoot").textContent = ws.length ? "across " + ws.length + " warrant" + (ws.length === 1 ? "" : "s") : "no warrants yet";
+  $("#statCount").textContent = String(ws.length);
+
+  const vendTotals = aggregateVendors(ws);
+  const topVendor = Object.entries(vendTotals).sort((a, b) => b[1] - a[1])[0];
+  if (topVendor && topVendor[1] > 0) {
+    $("#statTopVendor").textContent = topVendor[0];
+    $("#statTopVendorFoot").textContent = fmtMoney(topVendor[1]) + " so far";
+  } else {
+    $("#statTopVendor").textContent = "—";
+    $("#statTopVendorFoot").textContent = "no vendor data yet";
+  }
+
+  const cats = aggregateCategories(ws);
+  const top = Object.entries(cats).sort((a, b) => b[1] - a[1])[0];
+  if (top && top[1] > 0) {
+    $("#statTopCat").textContent = top[0];
+    $("#statTopCatFoot").textContent = fmtMoney(top[1]) + " so far";
+  } else {
+    $("#statTopCat").textContent = "—";
+    $("#statTopCatFoot").textContent = "awaiting category data";
+  }
+}
+
+function aggregateCategories(ws){
+  const out = {};
+  CATEGORIES.forEach(c => out[c] = 0);
+  ws.forEach(w => {
+    const cats = w.categories || {};
+    Object.entries(cats).forEach(([k, v]) => { out[k] = (out[k] || 0) + (Number(v) || 0); });
+  });
+  return out;
+}
+
+function renderCategoryPanel(){
+  $$("#categoryPanel .col-sort").forEach(btn => {
+    btn.textContent = btn.dataset.label + (btn.dataset.key === catSort ? " ▾" : "");
+  });
+  const ws = allWarrants();
+  const withCats = ws.filter(w => w.categories && Object.keys(w.categories).length);
+  const cats = aggregateCategories(ws);
+  const max = Math.max(1, ...Object.values(cats));
+  const totalAll = ws.reduce((s, w) => s + (Number(w.total) || 0), 0);
+  const body = $("#categoryBody");
+  const hint = $("#categoryHint");
+
+  if (!withCats.length) {
+    hint.textContent = "";
+    body.innerHTML =
+      '<div class="empty"><b>No per-warrant category data yet</b>' +
+      'Category totals fill in as warrants are uploaded and confirmed through the review step. ' +
+      (ws.length
+        ? 'The ' + ws.length + ' seeded warrants carry confirmed totals and known vendors, but not a per-warrant category split — re-upload a bill schedule to add it.'
+        : 'Upload a bill schedule to get started.') +
+      '</div>';
+    return;
+  }
+  hint.textContent = withCats.length + " of " + ws.length + " warrants have category data";
+  let rows = CATEGORIES.map(c => [c, cats[c] || 0]).filter(([, v]) => v > 0);
+  rows = catSort === "name" ? rows.sort((a, b) => a[0].localeCompare(b[0])) : rows.sort((a, b) => b[1] - a[1]);
+  body.innerHTML = rows.map(([name, amt]) => (
+    '<div class="bar-row">' +
+      '<div class="name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + Math.max(2, (amt / max) * 100) + '%"></div></div>' +
+      '<div class="amt mono">' + fmtMoney(amt) + '</div>' +
+      '<div class="pct">' + (totalAll ? (amt / totalAll * 100).toFixed(1) : "0.0") + '%</div>' +
+    '</div>'
+  )).join("");
+}
+
+function aggregateVendors(ws){
+  const out = {};
+  ws.forEach(w => {
+    Object.entries(w.vendors || {}).forEach(([k, v]) => { out[k] = (out[k] || 0) + (Number(v) || 0); });
+  });
+  return out;
+}
+
+function renderVendorPanel(filter){
+  $$("#vendorPanel .col-sort").forEach(btn => {
+    btn.textContent = btn.dataset.label + (btn.dataset.key === vendorSort ? " ▾" : "");
+  });
+  const ws = allWarrants();
+  const vend = aggregateVendors(ws);
+  const totalAll = ws.reduce((s, w) => s + (Number(w.total) || 0), 0);
+  const q = (filter || "").trim().toLowerCase();
+  let rows = Object.entries(vend);
+  if (q) rows = rows.filter(([name]) => name.toLowerCase().includes(q));
+  rows = vendorSort === "name" ? rows.sort((a, b) => a[0].localeCompare(b[0])) : rows.sort((a, b) => b[1] - a[1]);
+  const hint = $("#vendorHint");
+  hint.textContent = Object.keys(vend).length ? Object.keys(vend).length + " vendors tracked" : "";
+  const body = $("#vendorBody");
+  if (!rows.length) {
+    body.innerHTML = '<div class="empty"><b>' + (q ? "No matching vendors" : "No vendor data yet") + '</b>' +
+      (q ? "Try a different search." : "Known totals (Amazon, and each warrant's largest line item) seed this list; uploading bill schedules fills in the rest.") + '</div>';
+    return;
+  }
+  body.innerHTML = rows.map(([name, amt]) => (
+    '<div class="vendor-row"><div class="nm" title="' + escapeHtml(name) + '">' + escapeHtml(name) +
+      (name === "Amazon Capital Services" ? '<span class="pill">tracked</span>' : '') +
+      '</div><div class="amt mono">' + fmtMoney(amt) + '</div>' +
+      '<div class="pct">' + (totalAll ? (amt / totalAll * 100).toFixed(1) : "0.0") + '%</div></div>'
+  )).join("");
+}
+
+function renderWarrantTable(){
+  let ws = Array.from(state.warrants.entries());
+  const tbody = $("#warrantRows");
+  $$(".th-sort").forEach(btn => {
+    const active = btn.dataset.key === warrantSort.key;
+    btn.textContent = btn.dataset.label + (active ? (warrantSort.dir === "asc" ? " ▲" : " ▼") : "");
+  });
+  if (!ws.length) {
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><b>No warrants on file</b>Upload a bill schedule PDF to start the ledger.</div></td></tr>';
+    return;
+  }
+  const totalAll = ws.reduce((s, [, w]) => s + (Number(w.total) || 0), 0);
+  const key = warrantSort.key, dir = warrantSort.dir;
+  const reconRank = v => v === true ? 2 : v === false ? 0 : 1;
+  ws = ws.sort((a, b) => {
+    let av = a[1][key], bv = b[1][key];
+    if (key === "reconciled") { av = reconRank(av); bv = reconRank(bv); }
+    else if (key === "warrantNo" || key === "quality" || key === "dateISO") { av = String(av || ""); bv = String(bv || ""); }
+    else { av = Number(av) || 0; bv = Number(bv) || 0; }
+    if (typeof av === "string") { const c = av.localeCompare(bv); return dir === "asc" ? c : -c; }
+    return dir === "asc" ? av - bv : bv - av;
+  });
+  tbody.innerHTML = ws.map(([id, w]) => {
+    const recon = w.reconciled === true ? '<span class="badge good">reconciled</span>'
+      : w.reconciled === false ? '<span class="badge bad">mismatch</span>'
+      : '<span class="badge neutral">—</span>';
+    const quality = w.quality === "full" ? '<span class="quality-tag" style="color:var(--good)">full detail</span>'
+      : w.quality === "legacy-partial" ? '<span class="quality-tag">legacy · totals known</span>'
+      : w.quality === "legacy-pending" ? '<span class="quality-tag">legacy · totals only</span>'
+      : '<span class="quality-tag">—</span>';
+    const pct = totalAll ? ((Number(w.total) || 0) / totalAll * 100).toFixed(1) : "0.0";
+    return '<tr data-id="' + escapeHtml(id) + '">' +
+      '<td class="mono">' + escapeHtml(w.label || isoToLabel(w.dateISO)) + '</td>' +
+      '<td class="mono">' + escapeHtml(w.warrantNo || "—") + '</td>' +
+      '<td class="num">' + fmtMoney(w.total) + '</td>' +
+      '<td class="num">' + pct + '%</td>' +
+      '<td class="num">' + (w.invoiceCount != null ? w.invoiceCount : "—") + '</td>' +
+      '<td>' + recon + '</td>' +
+      '<td>' + quality + '</td>' +
+    '</tr>';
+  }).join("");
+  $$("tr[data-id]", tbody).forEach(tr => tr.addEventListener("click", () => openDetail(tr.dataset.id)));
+}
+
+function openDetail(id){
+  const w = state.warrants.get(id);
+  if (!w) return;
+  $("#dtTitle").textContent = (w.label || isoToLabel(w.dateISO)) + (w.warrantNo ? " · Warrant #" + w.warrantNo : "");
+  $("#dtSub").textContent = fmtMoney(w.total) + (w.invoiceCount != null ? " · " + w.invoiceCount + " invoices" : "") + (w.notes ? " · " + w.notes : "");
+  const cats = Object.entries(w.categories || {}).sort((a, b) => b[1] - a[1]);
+  const vends = Object.entries(w.vendors || {}).sort((a, b) => b[1] - a[1]);
+  let html = "";
+  html += '<h3 style="font-size:13.5px;margin-bottom:8px">By category</h3>';
+  html += cats.length
+    ? '<table class="mini-table">' + cats.map(([k, v]) => '<tr><td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>').join("") + '</table>'
+    : '<div class="empty" style="padding:10px 0">No category breakdown saved for this warrant.</div>';
+  html += '<h3 style="font-size:13.5px;margin:16px 0 8px">By vendor</h3>';
+  html += vends.length
+    ? '<table class="mini-table">' + vends.map(([k, v]) => '<tr><td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>').join("") + '</table>'
+    : '<div class="empty" style="padding:10px 0">No vendor detail saved for this warrant.</div>';
+  $("#detailBody").innerHTML = html;
+  $("#detailModal").hidden = false;
+}
+$("#detailClose").addEventListener("click", () => { $("#detailModal").hidden = true; });
+$("#detailModal").addEventListener("click", (e) => { if (e.target.id === "detailModal") $("#detailModal").hidden = true; });
+
+$("#vendorSearch").addEventListener("input", (e) => renderVendorPanel(e.target.value));
+
+$$("#categoryPanel .col-sort").forEach(b => b.addEventListener("click", () => {
+  catSort = b.dataset.key;
+  renderCategoryPanel();
+}));
+$$("#vendorPanel .col-sort").forEach(b => b.addEventListener("click", () => {
+  vendorSort = b.dataset.key;
+  renderVendorPanel($("#vendorSearch").value || "");
+}));
+$$(".th-sort").forEach(btn => btn.addEventListener("click", () => {
+  const k = btn.dataset.key;
+  if (warrantSort.key === k) warrantSort.dir = warrantSort.dir === "asc" ? "desc" : "asc";
+  else { warrantSort.key = k; warrantSort.dir = (k === "warrantNo" || k === "quality") ? "asc" : "desc"; }
+  renderWarrantTable();
+}));
+
+/* ---------------------------------------------------------------- *
+ * CSV export — a plain server route now, no capability needed.
+ * ---------------------------------------------------------------- */
+$("#exportBtn").addEventListener("click", () => {
+  window.location.href = "/api/export.csv";
+});
+
+/* ---------------------------------------------------------------- *
+ * Upload → render → extract → review → save
+ * ---------------------------------------------------------------- */
+let currentAbort = null;
+
+$("#uploadBtn").addEventListener("click", () => $("#fileInput").click());
+$("#fileInput").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = "";
+  for (const file of files) {
+    await processFile(file).catch(err => {
+      console.error(err);
+      toast("Couldn't finish reading " + file.name + ".", "bad");
+    });
+  }
+});
+$("#progressCancel").addEventListener("click", () => { if (currentAbort) currentAbort.abort(); hideOverlay(); });
+
+function showOverlay(filename){
+  $("#progressTitle").textContent = "Reading bill schedule…";
+  $("#progressFile").textContent = filename;
+  $("#progressFill").style.width = "4%";
+  $("#progressNote").textContent = "Starting…";
+  $("#progressOverlay").hidden = false;
+}
+function updateOverlay(note, pct){
+  $("#progressNote").textContent = note;
+  if (pct != null) $("#progressFill").style.width = Math.max(4, Math.min(100, pct)) + "%";
+}
+function hideOverlay(){ $("#progressOverlay").hidden = true; }
+
+async function processFile(file){
+  showOverlay(file.name);
+  const images = await renderPdfToImages(file, (note, pct) => updateOverlay(note, pct));
+  if (!images.length) { hideOverlay(); toast(file.name + " has no readable pages.", "bad"); return; }
+  const merged = await extractWarrant(images, (note, pct) => updateOverlay(note, pct));
+  hideOverlay();
+  if (!merged) return; // cancelled or failed; already toasted
+  openReview(merged, file.name);
+}
+
+async function renderPdfToImages(file, onProgress){
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const images = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    onProgress("Rendering page " + i + " of " + pdf.numPages, (i / pdf.numPages) * 25);
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 1.4 });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext("2d");
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    images.push(canvas.toDataURL("image/jpeg", 0.8));
+  }
+  return images;
+}
+
+function extractionPrompt(startPage, endPage, totalPages){
+  return [
+    "You are reading pages " + startPage + "-" + endPage + " of a " + totalPages + "-page Massachusetts school district bill schedule (a Munis \"Invoice Entry Proof List\" warrant). Page conventions for the WHOLE document, which may extend beyond these images:",
+    "- The first page of the whole document is a cover letter stating the warrant date and a grand total.",
+    "- The second page of the whole document is a batch-summary table with columns BATCH | DEPARTMENT | AMOUNT | INVOICES.",
+    "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description, sometimes an \"EXCEEDS PO BY\" column).",
+    "",
+    "From ONLY the pages shown in THESE images, extract this JSON object and reply with ONLY the JSON, no other text:",
+    "{",
+    '  "coverDate": "MM/DD/YYYY, or null if no cover page is in these images",',
+    '  "coverTotal": number or null,',
+    '  "warrantNo": "string like \\"24\\", or null",',
+    '  "summaryRows": [{"batch":"string","department":"string","amount":number,"invoices":number}],',
+    '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number}]',
+    "}",
+    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. Use null for anything not visible in these pages — other pages elsewhere in the document may supply it."
+  ].join("\n");
+}
+
+function imgToPayload(dataUrl){
+  const comma = dataUrl.indexOf(",");
+  return { data: dataUrl.slice(comma + 1), mediaType: "image/jpeg" };
+}
+
+async function callExtract(prompt, images, signal){
+  let resp;
+  try {
+    resp = await fetch("/api/extract", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal,
+      body: JSON.stringify({ prompt, images: images.map(imgToPayload) }),
+    });
+  } catch (e) {
+    if (e && e.name === "AbortError") throw { code: "cancelled" };
+    throw { code: "upstream_error", message: e && e.message };
+  }
+  if (resp.status === 503) throw { code: "not_granted" };
+  if (resp.status === 429) throw { code: "rate_limited" };
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw { code: resp.status === 422 ? "invalid_json" : "upstream_error", message: body.error };
+  }
+  return resp.json();
+}
+
+async function extractWarrant(images, onProgress){
+  const BATCH = 6;
+  const merged = { coverDate: null, coverTotal: null, warrantNo: null, summaryRows: [], lineItems: [] };
+  const total = images.length;
+  currentAbort = new AbortController();
+  for (let i = 0; i < total; i += BATCH) {
+    const chunk = images.slice(i, i + BATCH);
+    const startPage = i + 1, endPage = Math.min(i + BATCH, total);
+    onProgress("Reading pages " + startPage + "–" + endPage + " of " + total, 25 + (endPage / total) * 70);
+    const prompt = extractionPrompt(startPage, endPage, total);
+    let data;
+    try {
+      data = await callExtract(prompt, chunk, currentAbort.signal);
+    } catch (e) {
+      if (e && e.code === "cancelled") { toast("Cancelled.", "bad"); return null; }
+      if (e && (e.code === "invalid_json" || e.code === "upstream_error")) {
+        try {
+          data = await callExtract(prompt, chunk, currentAbort.signal);
+        } catch (e2) {
+          toast("Couldn't read pages " + startPage + "–" + endPage + " — skipping them.", "bad");
+          continue;
+        }
+      } else if (e && e.code === "not_granted") {
+        toast("Uploads are disabled — no Anthropic API key configured on the server.", "bad");
+        return null;
+      } else if (e && e.code === "rate_limited") {
+        toast("Too many requests right now — try again shortly.", "bad");
+        return null;
+      } else {
+        toast("Something went wrong reading pages " + startPage + "–" + endPage + " — skipping them.", "bad");
+        continue;
+      }
+    }
+    if (data && typeof data === "object") {
+      if (data.coverDate && !merged.coverDate) merged.coverDate = data.coverDate;
+      if (data.coverTotal != null && merged.coverTotal == null) merged.coverTotal = Number(data.coverTotal);
+      if (data.warrantNo && !merged.warrantNo) merged.warrantNo = String(data.warrantNo);
+      if (Array.isArray(data.summaryRows)) merged.summaryRows.push(...data.summaryRows);
+      if (Array.isArray(data.lineItems)) merged.lineItems.push(...data.lineItems);
+    }
+  }
+  return merged;
+}
+
+function buildCategories(summaryRows){
+  const out = {};
+  summaryRows.forEach(r => {
+    if (!r.include) return;
+    const cat = r.category || categorize(r.department);
+    out[cat] = round2((out[cat] || 0) + (Number(r.amount) || 0));
+  });
+  return out;
+}
+function buildVendors(lineItems){
+  const out = {};
+  lineItems.forEach(r => {
+    if (!r.include) return;
+    const v = normalizeVendor(r.vendor);
+    out[v] = round2((out[v] || 0) + (Number(r.amount) || 0));
+  });
+  return out;
+}
+
+function resolveWarrantId(dateISO, total){
+  let suffix = 0;
+  while (suffix <= 8) {
+    const id = suffix === 0 ? dateISO : dateISO + "-b" + (suffix + 1);
+    const existing = state.warrants.get(id);
+    if (!existing) return { id, duplicateOf: null };
+    if (existing.total != null && total != null && Math.abs(Number(existing.total) - Number(total)) < 0.02) {
+      return { id, duplicateOf: existing, duplicateId: id };
+    }
+    suffix++;
+  }
+  return { id: dateISO + "-b" + (suffix + 1), duplicateOf: null };
+}
+
+let reviewCtx = null;
+
+function openReview(merged, filename){
+  const summaryRows = (merged.summaryRows || []).map(r => ({
+    batch: r.batch || "", department: r.department || "", amount: Number(r.amount) || 0,
+    category: categorize(r.department), include: true,
+  }));
+  const lineItems = (merged.lineItems || []).map(r => ({
+    vendor: r.vendor || "", description: r.description || "", amount: Number(r.amount) || 0, include: true,
+  }));
+  const dateISO = mmddyyyyToISO(merged.coverDate);
+  reviewCtx = { merged, summaryRows, lineItems, filename, dup: null };
+
+  $("#reviewFileName").textContent = filename;
+  $("#rvDate").value = dateISO || "";
+  $("#rvNo").value = merged.warrantNo || "";
+  $("#rvTotal").value = merged.coverTotal != null ? merged.coverTotal : "";
+
+  renderReviewRows();
+  updateReconBadge();
+
+  const dupBanner = $("#dupBanner");
+  dupBanner.hidden = true;
+  if (dateISO && merged.coverTotal != null) {
+    const { duplicateOf, duplicateId } = resolveWarrantId(dateISO, merged.coverTotal);
+    if (duplicateOf) {
+      reviewCtx.dup = duplicateId;
+      dupBanner.hidden = false;
+      dupBanner.textContent = "This looks like a duplicate of the warrant already on file for " + isoToLabel(dateISO) + " (" + fmtMoney(duplicateOf.total) + ") — saving will overwrite it unless you change the date.";
+    }
+  }
+
+  $("#reviewModal").hidden = false;
+}
+
+function renderReviewRows(){
+  const sBody = $("#rvSummaryRows");
+  sBody.innerHTML = reviewCtx.summaryRows.length ? reviewCtx.summaryRows.map((r, i) => (
+    '<tr><td class="ex"><input type="checkbox" ' + (r.include ? "checked" : "") + ' data-srow="' + i + '"></td>' +
+    '<td>' + escapeHtml(r.batch) + '</td><td>' + escapeHtml(r.department) + '</td>' +
+    '<td><select data-scat="' + i + '">' + CATEGORIES.map(c => '<option' + (c === r.category ? " selected" : "") + '>' + escapeHtml(c) + '</option>').join("") + '</select></td>' +
+    '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td></tr>'
+  )).join("") : '<tr><td colspan="5" style="text-align:center;color:var(--ink-dim)">No batch-summary rows were found on the scanned pages.</td></tr>';
+
+  const lBody = $("#rvLineRows");
+  lBody.innerHTML = reviewCtx.lineItems.length ? reviewCtx.lineItems.map((r, i) => (
+    '<tr><td class="ex"><input type="checkbox" ' + (r.include ? "checked" : "") + ' data-lrow="' + i + '"></td>' +
+    '<td>' + escapeHtml(r.vendor) + '</td><td>' + escapeHtml(r.description) + '</td>' +
+    '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td></tr>'
+  )).join("") : '<tr><td colspan="4" style="text-align:center;color:var(--ink-dim)">No vendor line items were found on the scanned pages.</td></tr>';
+
+  $$("input[data-srow]", sBody).forEach(cb => cb.addEventListener("change", () => { reviewCtx.summaryRows[+cb.dataset.srow].include = cb.checked; updateReconBadge(); }));
+  $$("select[data-scat]", sBody).forEach(sel => sel.addEventListener("change", () => { reviewCtx.summaryRows[+sel.dataset.scat].category = sel.value; }));
+  $$("input[data-lrow]", lBody).forEach(cb => cb.addEventListener("change", () => { reviewCtx.lineItems[+cb.dataset.lrow].include = cb.checked; }));
+}
+
+function updateReconBadge(){
+  const sum = reviewCtx.summaryRows.filter(r => r.include).reduce((s, r) => s + r.amount, 0);
+  const total = Number($("#rvTotal").value);
+  const wrap = $("#reconBadgeWrap");
+  if (!$("#rvTotal").value) { wrap.innerHTML = '<span class="badge neutral">Enter the stated total to check reconciliation</span>'; return; }
+  const diff = round2(sum - total);
+  if (Math.abs(diff) < 0.02) wrap.innerHTML = '<span class="badge good">Reconciled — batch rows sum to the stated total</span>';
+  else wrap.innerHTML = '<span class="badge bad">Off by ' + fmtMoney(diff) + ' — batch rows vs. stated total</span>';
+}
+$("#rvTotal").addEventListener("input", updateReconBadge);
+
+$("#reviewClose").addEventListener("click", closeReview);
+$("#reviewCancel").addEventListener("click", closeReview);
+$("#reviewModal").addEventListener("click", (e) => { if (e.target.id === "reviewModal") closeReview(); });
+function closeReview(){ $("#reviewModal").hidden = true; reviewCtx = null; }
+
+$("#reviewSave").addEventListener("click", async () => {
+  if (!reviewCtx) return;
+  const dateISO = $("#rvDate").value;
+  if (!dateISO) { toast("Enter a warrant date before saving.", "bad"); return; }
+  const totalVal = $("#rvTotal").value;
+  const total = totalVal === "" ? null : round2(Number(totalVal));
+  const { id } = resolveWarrantId(dateISO, total);
+  const categories = buildCategories(reviewCtx.summaryRows);
+  const vendors = buildVendors(reviewCtx.lineItems);
+  const sum = reviewCtx.summaryRows.filter(r => r.include).reduce((s, r) => s + r.amount, 0);
+  const record = {
+    dateISO, warrantNo: $("#rvNo").value || null, label: isoToLabel(dateISO),
+    total, invoiceCount: reviewCtx.lineItems.filter(r => r.include).length || null,
+    categories, vendors, quality: "full",
+    reconciled: total != null ? Math.abs(round2(sum - total)) < 0.02 : null,
+    source: "upload", sourceFile: reviewCtx.filename, createdAt: new Date().toISOString(),
+  };
+  try {
+    const res = await fetch("/api/warrants/" + encodeURIComponent(id), {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(record),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || "save failed");
+    }
+    await loadWarrants();
+    toast("Saved " + record.label + " to the ledger.", "good");
+    closeReview();
+  } catch (e) {
+    toast("Couldn't save — " + (e && e.message ? e.message : "try again."), "bad");
+  }
+});
+
+/* ---------------------------------------------------------------- *
+ * Boot
+ * ---------------------------------------------------------------- */
+initResizers();
+initApp();
+
+})();
+</script>
+</body>
+</html>

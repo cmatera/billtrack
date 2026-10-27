@@ -1,0 +1,16 @@
+{
+  "name": "sutton-bill-ledger",
+  "version": "1.0.0",
+  "description": "Self-hosted Sutton Public Schools bill schedule tracker — categorizes and tracks warrant spending by category and vendor, with PDF upload and review.",
+  "private": true,
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
