@@ -59,6 +59,26 @@ function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
+// Same vendor-alias table as public/index.html (normalizeVendor()), so a
+// backfilled vendor line item matches the name already used in "Spending
+// by vendor" and can be clicked into from there.
+const VENDOR_ALIASES = [
+  [/\bamazon\b|^amzn/i, "Amazon Capital Services"],
+  [/whitewater/i, "Whitewater, Inc."],
+  [/spencer meadow/i, "Spencer Meadow Solar"],
+  [/evergreen center/i, "Evergreen Center"],
+  [/great minds/i, "Great Minds PBC"],
+  [/aa transportation/i, "AA Transportation"],
+  [/national grid/i, "National Grid"],
+  [/rfk community/i, "RFK Community Alliance"],
+];
+function normalizeVendor(raw) {
+  let s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s) return "Unknown vendor";
+  for (const [re, canon] of VENDOR_ALIASES) if (re.test(s)) return canon;
+  return s;
+}
+
 // Same prompt the browser sends per page-batch (public/index.html, extractionPrompt()).
 function extractionPrompt(startPage, endPage, totalPages) {
   return [
@@ -180,6 +200,18 @@ function toSummaryRows(merged) {
   return rows;
 }
 
+// Per-vendor-line detail, parallel to toSummaryRows() but for the vendor
+// side — this is what backfills the vendor drill-down and PO-overage
+// flags for warrants uploaded before the lineItems column existed.
+function toLineItems(merged) {
+  return (merged.lineItems || []).map((li) => ({
+    vendor: normalizeVendor(li.vendor),
+    description: li.description || "",
+    amount: round2(li.amount),
+    exceedsPoBy: round2(li.exceedsPoBy || 0),
+  }));
+}
+
 async function main() {
   if (!fs.existsSync(DB_FILE)) {
     console.error(`No database found at ${DB_FILE}`);
@@ -187,22 +219,25 @@ async function main() {
   }
   const db = new Database(DB_FILE);
 
+  const isEmptyJsonArray = (text) => {
+    try {
+      const parsed = JSON.parse(text || "[]");
+      return !Array.isArray(parsed) || parsed.length === 0;
+    } catch (_) {
+      return true;
+    }
+  };
+
   let rows = db.prepare("SELECT * FROM warrants WHERE sourcePdfPath IS NOT NULL ORDER BY dateISO").all();
   if (ONLY_ID) rows = rows.filter((r) => r.id === ONLY_ID);
   if (!FORCE) {
-    rows = rows.filter((r) => {
-      let parsed;
-      try {
-        parsed = JSON.parse(r.summaryRows || "[]");
-      } catch (_) {
-        parsed = [];
-      }
-      return !Array.isArray(parsed) || parsed.length === 0;
-    });
+    // Needs a pass if either column is still empty — covers a warrant that
+    // was already backfilled for summaryRows before lineItems existed too.
+    rows = rows.filter((r) => isEmptyJsonArray(r.summaryRows) || isEmptyJsonArray(r.lineItems));
   }
 
   if (!rows.length) {
-    console.log(ONLY_ID ? `No matching warrant (or it already has summaryRows — pass --force to redo it).` : "Nothing to backfill — every warrant with a source PDF already has row-level detail.");
+    console.log(ONLY_ID ? `No matching warrant (or it already has full detail — pass --force to redo it).` : "Nothing to backfill — every warrant with a source PDF already has row-level detail.");
     return;
   }
 
@@ -238,8 +273,10 @@ async function main() {
       }
       const merged = await extractWarrantFromPages(raster.files, label);
       const summaryRows = toSummaryRows(merged);
+      const lineItems = toLineItems(merged);
+      const poFlagged = lineItems.filter((li) => li.exceedsPoBy > 0).length;
 
-      if (!summaryRows.length) {
+      if (!summaryRows.length && !lineItems.length) {
         console.log(`✗ ${label}: extraction found no batch-summary rows or line items — leaving as-is.`);
         failed++;
         continue;
@@ -247,11 +284,12 @@ async function main() {
 
       const newTotal = round2(summaryRows.reduce((s, r) => s + r.amount, 0));
       const oldTotal = row.total == null ? null : round2(row.total);
-      const note = oldTotal != null && Math.abs(newTotal - oldTotal) > 0.02 ? `  (⚠ sums to ${newTotal.toFixed(2)}, stored total is ${oldTotal.toFixed(2)} — categories/total left untouched either way)` : "";
-      console.log(`✓ ${label}: ${summaryRows.length} row(s) recovered.${note}`);
+      const mismatchNote = oldTotal != null && newTotal > 0 && Math.abs(newTotal - oldTotal) > 0.02 ? `  (⚠ sums to ${newTotal.toFixed(2)}, stored total is ${oldTotal.toFixed(2)} — categories/total left untouched either way)` : "";
+      const poNote = poFlagged ? `  (${poFlagged} invoice${poFlagged === 1 ? "" : "s"} exceeded PO)` : "";
+      console.log(`✓ ${label}: ${summaryRows.length} summary row(s), ${lineItems.length} line item(s) recovered.${poNote}${mismatchNote}`);
 
       if (!DRY_RUN) {
-        db.prepare("UPDATE warrants SET summaryRows = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(summaryRows), new Date().toISOString(), row.id);
+        db.prepare("UPDATE warrants SET summaryRows = ?, lineItems = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(summaryRows), JSON.stringify(lineItems), new Date().toISOString(), row.id);
       }
       ok++;
     } finally {

@@ -133,6 +133,8 @@ tbody tr:hover{background:var(--surface-2)}
 .modal-card.wide{max-width:860px}
 .bar-row[data-cat]{cursor:pointer}
 .bar-row[data-cat]:hover{background:var(--surface-2)}
+.vendor-row[data-vendor]{cursor:pointer}
+.vendor-row[data-vendor]:hover{background:var(--surface-2)}
 .modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:20px 22px 8px}
 .modal-head h3{font-size:18px}
 .modal-head .x{background:none;border:none;color:var(--ink-dim);font-size:20px;cursor:pointer;line-height:1;padding:2px 6px}
@@ -142,8 +144,8 @@ tbody tr:hover{background:var(--surface-2)}
 @media (max-width:560px){.field-row{grid-template-columns:1fr 1fr}}
 .field{display:flex;flex-direction:column;gap:4px}
 .field label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-dim);font-weight:600}
-.field input,.field select{font-family:var(--font-mono);font-size:13.5px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--ink)}
-.field select{font-family:var(--font-body)}
+.field input,.field select,.field textarea{font-family:var(--font-mono);font-size:13.5px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--ink)}
+.field select,.field textarea{font-family:var(--font-body)}
 .mini-table{width:100%;font-size:12.5px;border-collapse:collapse}
 .mini-table th{font-size:10.5px;padding:6px 8px}
 .mini-table td{padding:6px 8px}
@@ -279,17 +281,20 @@ tbody tr:hover{background:var(--surface-2)}
       </div>
 
       <h3 style="font-size:14px;margin-bottom:8px">Vendor line items found (uncheck to exclude)</h3>
-      <div class="scroll-box">
+      <div class="scroll-box" style="margin-bottom:16px">
         <table class="mini-table">
           <thead><tr>
             <th class="ex" title="Uncheck to leave this line item out of what gets saved."></th>
             <th title="Vendor name as extracted from the invoice, before alias normalization (e.g. folded into &quot;Amazon Capital Services&quot;)."><span class="hd">Vendor</span></th>
             <th title="Invoice description or line-item detail as printed on the bill schedule."><span class="hd">Description</span></th>
             <th style="text-align:right" title="Dollar amount for this line item."><span class="hd">Amount</span></th>
+            <th style="text-align:right" title="If the bill schedule flagged this invoice as exceeding its purchase order, the overage amount."><span class="hd">Exceeds PO</span></th>
           </tr></thead>
           <tbody id="rvLineRows"></tbody>
         </table>
       </div>
+
+      <div class="field"><label>Notes <span style="color:var(--ink-dim);font-weight:400">(optional — e.g. a question to raise at the meeting)</span></label><textarea id="rvNotes" rows="2" style="width:100%;resize:vertical"></textarea></div>
     </div>
     <div class="modal-foot">
       <button class="btn" id="reviewCancel">Cancel</button>
@@ -305,7 +310,14 @@ tbody tr:hover{background:var(--surface-2)}
       <div><h3 id="dtTitle">Warrant</h3><div class="desc" id="dtSub"></div></div>
       <button class="x" id="detailClose" aria-label="Close">×</button>
     </div>
-    <div class="modal-body" id="detailBody"></div>
+    <div class="modal-body">
+      <div id="detailBody"></div>
+      <div class="field" style="margin-top:16px">
+        <label>Notes <span style="color:var(--ink-dim);font-weight:400">(e.g. a question to raise at the meeting)</span></label>
+        <textarea id="dtNotes" rows="2" style="width:100%;resize:vertical"></textarea>
+        <button class="btn small" id="dtSaveNotes" style="align-self:flex-start;margin-top:6px">Save note</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -327,6 +339,31 @@ tbody tr:hover{background:var(--surface-2)}
             <th title="Opens the original bill schedule PDF this row came from, if it's on file."></th>
           </tr></thead>
           <tbody id="catDetailBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Vendor transactions modal -->
+<div class="modal" id="vendorDetailModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <div><h3 id="vdTitle">Vendor</h3><div class="desc" id="vdSub"></div></div>
+      <button class="x" id="vendorDetailClose" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="scroll-box">
+        <table class="mini-table">
+          <thead><tr>
+            <th title="Warrant date this line item came from.">Date</th>
+            <th title="Warrant number.">#</th>
+            <th title="Invoice description or line-item detail as printed on the bill schedule.">Description</th>
+            <th style="text-align:right" title="Dollar amount for this line item.">Amount</th>
+            <th style="text-align:right" title="Purchase-order overage flagged on the bill schedule, if any.">Exceeds PO</th>
+            <th title="Opens the original bill schedule PDF this line item came from, if it's on file."></th>
+          </tr></thead>
+          <tbody id="vdDetailBody"></tbody>
         </table>
       </div>
     </div>
@@ -637,7 +674,7 @@ function renderVendorPanel(filter){
     return;
   }
   body.innerHTML = rows.map(([name, amt]) => (
-    '<div class="vendor-row"><div class="nm" title="' + escapeHtml(name) + '">' + escapeHtml(name) +
+    '<div class="vendor-row" data-vendor="' + escapeHtml(name) + '" title="Click to see every line item saved under this vendor."><div class="nm" title="' + escapeHtml(name) + '">' + escapeHtml(name) +
       (name === "Amazon Capital Services" ? '<span class="pill">tracked</span>' : '') +
       '</div><div class="amt mono">' + fmtMoney(amt) + '</div>' +
       '<div class="pct">' + (totalAll ? (amt / totalAll * 100).toFixed(1) : "0.0") + '%</div></div>'
@@ -688,11 +725,14 @@ function renderWarrantTable(){
   $$("tr[data-id]", tbody).forEach(tr => tr.addEventListener("click", () => openDetail(tr.dataset.id)));
 }
 
+let currentDetailId = null;
 function openDetail(id){
   const w = state.warrants.get(id);
   if (!w) return;
+  currentDetailId = id;
   $("#dtTitle").textContent = (w.label || isoToLabel(w.dateISO)) + (w.warrantNo ? " · Warrant #" + w.warrantNo : "");
-  $("#dtSub").textContent = fmtMoney(w.total) + (w.invoiceCount != null ? " · " + w.invoiceCount + " invoices" : "") + (w.notes ? " · " + w.notes : "");
+  $("#dtSub").textContent = fmtMoney(w.total) + (w.invoiceCount != null ? " · " + w.invoiceCount + " invoices" : "");
+  $("#dtNotes").value = w.notes || "";
   const cats = Object.entries(w.categories || {}).sort((a, b) => b[1] - a[1]);
   const vends = Object.entries(w.vendors || {}).sort((a, b) => b[1] - a[1]);
   let html = "";
@@ -701,6 +741,12 @@ function openDetail(id){
       (w.sourceFile ? ' <span style="color:var(--ink-dim);font-weight:400">— ' + escapeHtml(w.sourceFile) + '</span>' : '') + '</a>';
   } else if (w.sourceFile) {
     html += '<div style="margin-bottom:14px;font-size:11.5px;color:var(--ink-dim)" title="The filename was recorded, but the PDF itself wasn\'t saved — likely uploaded before source-PDF storage was added.">Source: ' + escapeHtml(w.sourceFile) + ' (original file not stored)</div>';
+  }
+  const poFlagged = (w.lineItems || []).filter(li => Number(li.exceedsPoBy) > 0);
+  if (poFlagged.length) {
+    const poTotal = poFlagged.reduce((s, li) => s + Number(li.exceedsPoBy), 0);
+    html += '<div style="margin-bottom:14px"><span class="badge warn" title="Invoices on this warrant flagged as exceeding their purchase order.">' +
+      poFlagged.length + ' invoice' + (poFlagged.length === 1 ? "" : "s") + ' exceeded PO by ' + fmtMoney(poTotal) + '</span></div>';
   }
   html += '<h3 style="font-size:13.5px;margin-bottom:8px">By category</h3>';
   html += cats.length
@@ -715,6 +761,28 @@ function openDetail(id){
 }
 $("#detailClose").addEventListener("click", () => { $("#detailModal").hidden = true; });
 $("#detailModal").addEventListener("click", (e) => { if (e.target.id === "detailModal") $("#detailModal").hidden = true; });
+
+// Notes are the one field on an already-saved warrant this UI lets you edit
+// after the fact — everything else is a PUT with the record otherwise
+// unchanged, same shape loadWarrants() already gave us.
+async function saveDetailNotes(id){
+  const w = state.warrants.get(id);
+  if (!w) return;
+  const notes = $("#dtNotes").value.trim() || null;
+  try {
+    const res = await fetch("/api/warrants/" + encodeURIComponent(id), {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...w, notes }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "save failed");
+    await loadWarrants();
+    toast("Note saved.", "good");
+  } catch (e) {
+    toast("Couldn't save the note — " + (e && e.message ? e.message : "try again."), "bad");
+  }
+}
+$("#dtSaveNotes").addEventListener("click", () => { if (currentDetailId) saveDetailNotes(currentDetailId); });
 
 // Category rows (in "Spending by category") are the only place individual
 // row-level detail is kept — categories are assigned per batch-summary row,
@@ -753,6 +821,44 @@ $("#categoryBody").addEventListener("click", (e) => {
 });
 $("#categoryClose").addEventListener("click", () => { $("#categoryModal").hidden = true; });
 $("#categoryModal").addEventListener("click", (e) => { if (e.target.id === "categoryModal") $("#categoryModal").hidden = true; });
+
+// Vendor rows (in "Spending by vendor") keep the same per-line-item detail
+// as categories do, keyed by the normalized vendor name saved with each
+// line item — same idea as openCategoryDetail, just the other axis of the
+// same underlying transactions.
+function openVendorDetail(name){
+  const ws = allWarrants();
+  const rows = [];
+  ws.forEach(w => (w.lineItems || []).forEach(r => { if (r.vendor === name) rows.push({ w, r }); }));
+  rows.sort((a, b) => (b.w.dateISO || "").localeCompare(a.w.dateISO || "") || (b.r.amount - a.r.amount));
+  const total = rows.reduce((s, x) => s + (Number(x.r.amount) || 0), 0);
+
+  $("#vdTitle").textContent = name;
+  $("#vdSub").textContent = rows.length
+    ? fmtMoney(total) + " across " + rows.length + " line item" + (rows.length === 1 ? "" : "s")
+    : "No line-item detail saved for this vendor";
+
+  $("#vdDetailBody").innerHTML = rows.length ? rows.map(({ w, r }) => (
+    '<tr>' +
+      '<td class="mono">' + escapeHtml(w.label || isoToLabel(w.dateISO)) + '</td>' +
+      '<td class="mono">' + escapeHtml(w.warrantNo || "—") + '</td>' +
+      '<td>' + escapeHtml(r.description || "—") + '</td>' +
+      '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td>' +
+      '<td style="text-align:right" class="mono">' + (Number(r.exceedsPoBy) > 0 ? '<span class="badge warn">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td>' +
+      '<td>' + (w.hasSourcePdf
+        ? '<a class="btn small" style="text-decoration:none" href="/api/warrants/' + encodeURIComponent(w.id) + '/source" target="_blank" rel="noopener" title="Opens the original bill schedule PDF this line item came from.">View PDF</a>'
+        : '') + '</td>' +
+    '</tr>'
+  )).join("") : '<tr><td colspan="6" style="text-align:center;color:var(--ink-dim);padding:16px 0">This vendor’s total comes from warrants saved before per-line-item detail was kept — only the aggregate total is available for those.</td></tr>';
+
+  $("#vendorDetailModal").hidden = false;
+}
+$("#vendorBody").addEventListener("click", (e) => {
+  const row = e.target.closest(".vendor-row[data-vendor]");
+  if (row) openVendorDetail(row.dataset.vendor);
+});
+$("#vendorDetailClose").addEventListener("click", () => { $("#vendorDetailModal").hidden = true; });
+$("#vendorDetailModal").addEventListener("click", (e) => { if (e.target.id === "vendorDetailModal") $("#vendorDetailModal").hidden = true; });
 
 $("#vendorSearch").addEventListener("input", (e) => renderVendorPanel(e.target.value));
 
@@ -1001,7 +1107,8 @@ function openReview(merged, file, queueLabel){
     category: categorize(r.department), include: true,
   }));
   const lineItems = (merged.lineItems || []).map(r => ({
-    vendor: r.vendor || "", description: r.description || "", amount: Number(r.amount) || 0, include: true,
+    vendor: r.vendor || "", description: r.description || "", amount: Number(r.amount) || 0,
+    exceedsPoBy: Number(r.exceedsPoBy) || 0, include: true,
   }));
   // Short warrants (often a single invoice) sometimes skip the batch-summary
   // page entirely — there's nothing there to categorize or reconcile
@@ -1023,6 +1130,7 @@ function openReview(merged, file, queueLabel){
   $("#rvDate").value = dateISO || "";
   $("#rvNo").value = merged.warrantNo || "";
   $("#rvTotal").value = merged.coverTotal != null ? merged.coverTotal : "";
+  $("#rvNotes").value = "";
 
   renderReviewRows();
   updateReconBadge();
@@ -1054,8 +1162,9 @@ function renderReviewRows(){
   lBody.innerHTML = reviewCtx.lineItems.length ? reviewCtx.lineItems.map((r, i) => (
     '<tr><td class="ex"><input type="checkbox" ' + (r.include ? "checked" : "") + ' data-lrow="' + i + '"></td>' +
     '<td>' + escapeHtml(r.vendor) + '</td><td>' + escapeHtml(r.description) + '</td>' +
-    '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td></tr>'
-  )).join("") : '<tr><td colspan="4" style="text-align:center;color:var(--ink-dim)">No vendor line items were found on the scanned pages.</td></tr>';
+    '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td>' +
+    '<td style="text-align:right" class="mono">' + (r.exceedsPoBy > 0 ? '<span class="badge warn" title="Flagged as exceeding its purchase order">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td></tr>'
+  )).join("") : '<tr><td colspan="5" style="text-align:center;color:var(--ink-dim)">No vendor line items were found on the scanned pages.</td></tr>';
 
   $$("input[data-srow]", sBody).forEach(cb => cb.addEventListener("change", () => { reviewCtx.summaryRows[+cb.dataset.srow].include = cb.checked; updateReconBadge(); }));
   $$("select[data-scat]", sBody).forEach(sel => sel.addEventListener("change", () => { reviewCtx.summaryRows[+sel.dataset.scat].category = sel.value; }));
@@ -1095,12 +1204,19 @@ $("#reviewSave").addEventListener("click", async () => {
   const summaryRows = reviewCtx.summaryRows
     .filter(r => r.include)
     .map(r => ({ batch: r.batch, department: r.department, category: r.category, amount: round2(r.amount) }));
+  // Per-line-item detail behind the vendor totals, keyed by the same
+  // normalized vendor name "Spending by vendor" aggregates with, so the
+  // vendor drill-down can match a vendor row back to its transactions.
+  const lineItems = reviewCtx.lineItems
+    .filter(r => r.include)
+    .map(r => ({ vendor: normalizeVendor(r.vendor), description: r.description, amount: round2(r.amount), exceedsPoBy: round2(r.exceedsPoBy || 0) }));
   const record = {
     dateISO, warrantNo: $("#rvNo").value || null, label: isoToLabel(dateISO),
     total, invoiceCount: reviewCtx.lineItems.filter(r => r.include).length || null,
-    categories, vendors, summaryRows, quality: "full",
+    categories, vendors, summaryRows, lineItems, quality: "full",
     reconciled: total != null ? Math.abs(round2(sum - total)) < 0.02 : null,
-    source: "upload", sourceFile: reviewCtx.filename, createdAt: new Date().toISOString(),
+    source: "upload", sourceFile: reviewCtx.filename, notes: $("#rvNotes").value.trim() || null,
+    createdAt: new Date().toISOString(),
   };
   try {
     const res = await fetch("/api/warrants/" + encodeURIComponent(id), {

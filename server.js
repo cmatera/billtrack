@@ -40,6 +40,7 @@ db.exec(`
     categories TEXT,
     vendors TEXT,
     summaryRows TEXT,
+    lineItems TEXT,
     quality TEXT,
     reconciled INTEGER,
     source TEXT,
@@ -56,6 +57,10 @@ db.exec(`
 {
   const cols = db.prepare("PRAGMA table_info(warrants)").all().map((c) => c.name);
   if (!cols.includes("summaryRows")) db.exec("ALTER TABLE warrants ADD COLUMN summaryRows TEXT");
+  // lineItems: per-vendor-line detail behind the "Spending by vendor" totals,
+  // same idea as summaryRows but for vendors — lets a vendor be clicked into
+  // just like a category can. Missing on warrants saved before this existed.
+  if (!cols.includes("lineItems")) db.exec("ALTER TABLE warrants ADD COLUMN lineItems TEXT");
 }
 
 function rowToWarrant(row) {
@@ -74,6 +79,11 @@ function rowToWarrant(row) {
     // individual rows that made it up, each traceable to its warrant's
     // source PDF. Absent on warrants saved before this was added.
     summaryRows: row.summaryRows ? JSON.parse(row.summaryRows) : [],
+    // Per-row detail behind the vendor totals — one row per included vendor
+    // line item, each carrying its normalized vendor name (so it matches
+    // "Spending by vendor" exactly) and any purchase-order overage flagged
+    // on the bill schedule. Absent on warrants saved before this was added.
+    lineItems: row.lineItems ? JSON.parse(row.lineItems) : [],
     quality: row.quality,
     reconciled: row.reconciled === null ? null : Boolean(row.reconciled),
     source: row.source,
@@ -141,6 +151,7 @@ app.put("/api/warrants/:id", (req, res) => {
     categories: JSON.stringify(body.categories || {}),
     vendors: JSON.stringify(body.vendors || {}),
     summaryRows: JSON.stringify(Array.isArray(body.summaryRows) ? body.summaryRows : []),
+    lineItems: JSON.stringify(Array.isArray(body.lineItems) ? body.lineItems : []),
     quality: body.quality ?? null,
     reconciled: body.reconciled === null || body.reconciled === undefined ? null : body.reconciled ? 1 : 0,
     source: body.source ?? null,
@@ -151,12 +162,12 @@ app.put("/api/warrants/:id", (req, res) => {
     updatedAt: now,
   };
   db.prepare(
-    `INSERT INTO warrants (id, dateISO, warrantNo, label, total, invoiceCount, categories, vendors, summaryRows, quality, reconciled, source, sourceFile, sourcePdfPath, notes, createdAt, updatedAt)
-     VALUES (@id, @dateISO, @warrantNo, @label, @total, @invoiceCount, @categories, @vendors, @summaryRows, @quality, @reconciled, @source, @sourceFile, @sourcePdfPath, @notes, @createdAt, @updatedAt)
+    `INSERT INTO warrants (id, dateISO, warrantNo, label, total, invoiceCount, categories, vendors, summaryRows, lineItems, quality, reconciled, source, sourceFile, sourcePdfPath, notes, createdAt, updatedAt)
+     VALUES (@id, @dateISO, @warrantNo, @label, @total, @invoiceCount, @categories, @vendors, @summaryRows, @lineItems, @quality, @reconciled, @source, @sourceFile, @sourcePdfPath, @notes, @createdAt, @updatedAt)
      ON CONFLICT(id) DO UPDATE SET
        dateISO=excluded.dateISO, warrantNo=excluded.warrantNo, label=excluded.label, total=excluded.total,
        invoiceCount=excluded.invoiceCount, categories=excluded.categories, vendors=excluded.vendors,
-       summaryRows=excluded.summaryRows, quality=excluded.quality, reconciled=excluded.reconciled, source=excluded.source,
+       summaryRows=excluded.summaryRows, lineItems=excluded.lineItems, quality=excluded.quality, reconciled=excluded.reconciled, source=excluded.source,
        sourceFile=excluded.sourceFile, notes=excluded.notes, updatedAt=excluded.updatedAt`
   ).run(row);
   res.json({ ok: true, id });
