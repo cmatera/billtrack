@@ -261,6 +261,7 @@ tbody tr:hover{background:var(--surface-2)}
       <div id="reconBadgeWrap" style="margin-bottom:14px"></div>
 
       <h3 style="font-size:14px;margin-bottom:8px">Batch summary → category (uncheck to exclude a row)</h3>
+      <div id="summarySynthNote" class="banner" hidden style="margin-bottom:10px">No batch-summary table was found on this warrant — these rows (and their categories) were guessed from the vendor line items below instead. Double-check them before saving.</div>
       <div class="scroll-box" style="margin-bottom:16px">
         <table class="mini-table">
           <thead><tr>
@@ -930,17 +931,30 @@ function resolveWarrantId(dateISO, total){
 let reviewCtx = null;
 
 function openReview(merged, file, queueLabel){
-  const summaryRows = (merged.summaryRows || []).map(r => ({
+  let summaryRows = (merged.summaryRows || []).map(r => ({
     batch: r.batch || "", department: r.department || "", amount: Number(r.amount) || 0,
     category: categorize(r.department), include: true,
   }));
   const lineItems = (merged.lineItems || []).map(r => ({
     vendor: r.vendor || "", description: r.description || "", amount: Number(r.amount) || 0, include: true,
   }));
+  // Short warrants (often a single invoice) sometimes skip the batch-summary
+  // page entirely — there's nothing there to categorize or reconcile
+  // against. Fall back to one synthesized row per vendor line item instead,
+  // still editable/correctable in the table before saving, rather than
+  // leaving the warrant with no category data and a false "mismatch".
+  const summarySynthesized = !summaryRows.length && lineItems.length > 0;
+  if (summarySynthesized) {
+    summaryRows = lineItems.map(li => ({
+      batch: "—", department: li.vendor, amount: li.amount,
+      category: categorize(li.vendor + " " + li.description), include: true,
+    }));
+  }
   const dateISO = mmddyyyyToISO(merged.coverDate);
-  reviewCtx = { merged, summaryRows, lineItems, file, filename: file.name, dup: null };
+  reviewCtx = { merged, summaryRows, lineItems, file, filename: file.name, dup: null, summarySynthesized };
 
   $("#reviewFileName").textContent = (queueLabel ? "File " + queueLabel + " · " : "") + file.name;
+  $("#summarySynthNote").hidden = !summarySynthesized;
   $("#rvDate").value = dateISO || "";
   $("#rvNo").value = merged.warrantNo || "";
   $("#rvTotal").value = merged.coverTotal != null ? merged.coverTotal : "";
