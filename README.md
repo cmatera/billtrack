@@ -1,6 +1,6 @@
 # Sutton Bill Ledger
 
-A self-hosted tracker for Sutton Public Schools bill schedule ("warrant") PDFs. Upload a bill schedule, it reads every page, categorizes spending into the School Committee's 13-category taxonomy, tracks spending by vendor (Amazon, Whitewater, etc.), flags whether the batch totals reconcile with the stated cover total, and catches duplicate uploads — with a review step before anything is saved.
+A self-hosted tracker for Sutton Public Schools bill schedule ("warrant") PDFs. Upload a bill schedule, it reads every page, categorizes spending into the School Committee's 13-category taxonomy, tracks spending by vendor (Amazon, Whitewater, etc.), flags whether the batch totals reconcile with the stated cover total, and catches duplicate uploads — with a review step before anything is saved. You can select several PDFs at once; they're queued and read one at a time, and each one's review step waits its turn so it never gets clobbered by the next file in the queue.
 
 This is a self-hosted port of a [claude.ai Artifact](https://claude.ai) version of the same tool. The artifact version got two things for free from the claude.ai platform: a shared database and an AI call to read PDF pages. Neither exists outside claude.ai, so this version replaces them with:
 

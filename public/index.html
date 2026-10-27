@@ -717,21 +717,45 @@ $("#exportBtn").addEventListener("click", () => {
  * ---------------------------------------------------------------- */
 let currentAbort = null;
 
+/* Upload queue — lets you pick several PDFs at once. They're still read and
+ * reviewed one at a time (the review step only has one modal), but picking
+ * a new one no longer clobbers whatever you're still reviewing: each file
+ * waits its turn until the previous one is saved, skipped, or cancelled. */
+let uploadQueue = [];
+let queueActive = false;
+let queueTotal = 0;
+let queueDone = 0;
+
 $("#uploadBtn").addEventListener("click", () => $("#fileInput").click());
-$("#fileInput").addEventListener("change", async (e) => {
+$("#fileInput").addEventListener("change", (e) => {
   const files = Array.from(e.target.files || []);
   e.target.value = "";
-  for (const file of files) {
-    await processFile(file).catch(err => {
+  if (!files.length) return;
+  if (queueActive) toast(files.length + " more file" + (files.length === 1 ? "" : "s") + " queued — up next after the current one.", "good");
+  uploadQueue.push(...files);
+  queueTotal += files.length;
+  if (!queueActive) runQueue();
+});
+$("#progressCancel").addEventListener("click", () => { if (currentAbort) currentAbort.abort(); hideOverlay(); });
+
+async function runQueue(){
+  queueActive = true;
+  while (uploadQueue.length) {
+    const file = uploadQueue.shift();
+    queueDone++;
+    const label = queueTotal > 1 ? (queueDone + " of " + queueTotal) : null;
+    await processFile(file, label).catch(err => {
       console.error(err);
       toast("Couldn't finish reading " + file.name + ".", "bad");
     });
   }
-});
-$("#progressCancel").addEventListener("click", () => { if (currentAbort) currentAbort.abort(); hideOverlay(); });
+  queueActive = false;
+  queueTotal = 0;
+  queueDone = 0;
+}
 
-function showOverlay(filename){
-  $("#progressTitle").textContent = "Reading bill schedule…";
+function showOverlay(filename, queueLabel){
+  $("#progressTitle").textContent = "Reading bill schedule…" + (queueLabel ? " (" + queueLabel + ")" : "");
   $("#progressFile").textContent = filename;
   $("#progressFill").style.width = "4%";
   $("#progressNote").textContent = "Starting…";
@@ -743,14 +767,23 @@ function updateOverlay(note, pct){
 }
 function hideOverlay(){ $("#progressOverlay").hidden = true; }
 
-async function processFile(file){
-  showOverlay(file.name);
+async function processFile(file, queueLabel){
+  showOverlay(file.name, queueLabel);
   const images = await renderPdfToImages(file, (note, pct) => updateOverlay(note, pct));
   if (!images.length) { hideOverlay(); toast(file.name + " has no readable pages.", "bad"); return; }
   const merged = await extractWarrant(images, (note, pct) => updateOverlay(note, pct));
   hideOverlay();
   if (!merged) return; // cancelled or failed; already toasted
-  openReview(merged, file);
+  await openReviewAndWait(merged, file, queueLabel);
+}
+
+// Opens the review modal and resolves once it's closed (saved, skipped, or
+// cancelled) — this is what makes the queue wait its turn instead of racing
+// ahead and clobbering the modal with the next file's data.
+let reviewCloseResolve = null;
+function openReviewAndWait(merged, file, queueLabel){
+  openReview(merged, file, queueLabel);
+  return new Promise(resolve => { reviewCloseResolve = resolve; });
 }
 
 async function renderPdfToImages(file, onProgress){
@@ -896,7 +929,7 @@ function resolveWarrantId(dateISO, total){
 
 let reviewCtx = null;
 
-function openReview(merged, file){
+function openReview(merged, file, queueLabel){
   const summaryRows = (merged.summaryRows || []).map(r => ({
     batch: r.batch || "", department: r.department || "", amount: Number(r.amount) || 0,
     category: categorize(r.department), include: true,
@@ -907,7 +940,7 @@ function openReview(merged, file){
   const dateISO = mmddyyyyToISO(merged.coverDate);
   reviewCtx = { merged, summaryRows, lineItems, file, filename: file.name, dup: null };
 
-  $("#reviewFileName").textContent = file.name;
+  $("#reviewFileName").textContent = (queueLabel ? "File " + queueLabel + " · " : "") + file.name;
   $("#rvDate").value = dateISO || "";
   $("#rvNo").value = merged.warrantNo || "";
   $("#rvTotal").value = merged.coverTotal != null ? merged.coverTotal : "";
@@ -964,7 +997,11 @@ $("#rvTotal").addEventListener("input", updateReconBadge);
 $("#reviewClose").addEventListener("click", closeReview);
 $("#reviewCancel").addEventListener("click", closeReview);
 $("#reviewModal").addEventListener("click", (e) => { if (e.target.id === "reviewModal") closeReview(); });
-function closeReview(){ $("#reviewModal").hidden = true; reviewCtx = null; }
+function closeReview(){
+  $("#reviewModal").hidden = true;
+  reviewCtx = null;
+  if (reviewCloseResolve) { const resolve = reviewCloseResolve; reviewCloseResolve = null; resolve(); }
+}
 
 $("#reviewSave").addEventListener("click", async () => {
   if (!reviewCtx) return;
