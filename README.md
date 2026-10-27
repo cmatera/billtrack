@@ -9,6 +9,8 @@ This is a self-hosted port of a [claude.ai Artifact](https://claude.ai) version 
 
 Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later. Click any row in "Spending by category" or "Spending by vendor" to drill into every row saved under it, across every warrant, each with a link straight to its source PDF. If a bill schedule flags an invoice as exceeding its purchase order, that's kept too and surfaced as a badge on the warrant and in the vendor drill-down. Each warrant also has an editable notes field, in the review step or later from its detail view — handy for flagging something to ask about before a meeting.
 
+A "Needs review" tile flags any warrant that doesn't reconcile, isn't full detail, or had its category rows guessed from vendor line items instead of a real batch-summary table — click it to see the whole list and why, instead of noticing by accident. "Spending trends" breaks category totals out by fiscal year (July–June) against the year before, so a spike or drop stands out instead of being buried in the all-time total. And "Search bill schedules" runs a full-text search over every stored PDF's actual text — a PO number, an exact dollar amount, anything printed on the page — not just what made it into a category or vendor row.
+
 Everything else — the category taxonomy, vendor normalization, the review-before-save flow, sortable/resizable columns — is the same frontend code.
 
 ## Running it
@@ -52,6 +54,19 @@ costs about the same as a normal upload (a few cents of Anthropic API
 usage). Flags: `--id=<warrant-id>` to backfill just one, `--force` to redo
 one that already has detail.
 
+### Backfilling full-text search for older warrants
+
+Full-text search only covers PDFs indexed after upload — a warrant saved
+before that existed isn't in the index yet. `scripts/backfill-pdf-text.js`
+fixes this with a local `pdftotext` pass over every stored PDF; it's pure
+text extraction, no Anthropic API calls, so there's no cost and it doesn't
+need the server running (it writes to the database directly):
+
+```
+docker compose exec ledger node scripts/backfill-pdf-text.js --dry-run
+docker compose exec ledger node scripts/backfill-pdf-text.js
+```
+
 ## API
 
 - `GET /api/config` — `{ extractionEnabled: boolean }`, whether `ANTHROPIC_API_KEY` is set.
@@ -61,6 +76,7 @@ one that already has detail.
 - `GET /api/warrants/:id/source` — streams the stored PDF back (opens inline in the browser).
 - `DELETE /api/warrants/:id` — remove one warrant record and its stored source PDF.
 - `GET /api/export.csv` — category + vendor totals as a CSV download.
+- `GET /api/search?q=...` — full-text search over every stored PDF's extracted text (requires at least 3 characters); returns matching warrants with short snippets. The full text itself never leaves the server.
 - `POST /api/extract` — `{ prompt, images: [{data, mediaType}] }` → calls the Anthropic API with the page images and returns the parsed JSON reply. Internal to the frontend; not meant to be called directly.
 
 ## Notes

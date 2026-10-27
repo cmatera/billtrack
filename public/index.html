@@ -54,9 +54,12 @@ h1,h2,h3{font-family:var(--font-display);margin:0;text-wrap:balance}
 .btn.danger{color:var(--bad);border-color:var(--bad-soft)}
 .btn.small{padding:6px 10px;font-size:12.5px}
 main{max-width:1180px;margin:0 auto;padding-block:22px 60px}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
-@media (max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px}
+@media (max-width:900px){.stats{grid-template-columns:repeat(3,1fr)}}
+@media (max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}}
 .stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
+.stat[data-clickable]{cursor:pointer}
+.stat[data-clickable]:hover{background:var(--surface-2)}
 .stat .label{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-dim);font-weight:600}
 .stat .value{font-family:var(--font-display);font-size:24px;font-weight:800;margin-top:4px;letter-spacing:-0.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .stat .foot{font-size:12px;color:var(--ink-dim);margin-top:2px}
@@ -135,6 +138,22 @@ tbody tr:hover{background:var(--surface-2)}
 .bar-row[data-cat]:hover{background:var(--surface-2)}
 .vendor-row[data-vendor]{cursor:pointer}
 .vendor-row[data-vendor]:hover{background:var(--surface-2)}
+
+.trend-row{display:grid;grid-template-columns:var(--cat-name-w,150px) 1fr 84px 84px 70px;gap:10px;align-items:center;padding:6px 0}
+.trend-row .name{font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trend-row .amt{font-family:var(--font-mono);font-size:12.5px;font-variant-numeric:tabular-nums;text-align:right;min-width:0}
+.trend-row .amt.dim{color:var(--ink-dim)}
+.trend-row .delta{font-family:var(--font-mono);font-size:11.5px;text-align:right;font-weight:600}
+.trend-row .delta.up{color:var(--bad)}
+.trend-row .delta.down{color:var(--good)}
+
+.search-result{border-top:1px solid var(--line);padding:10px 0}
+.search-result:first-child{border-top:none}
+.search-result .sr-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:4px}
+.search-result .sr-title{font-size:13px;font-weight:600}
+.search-result .sr-count{font-size:11px;color:var(--ink-dim)}
+.search-result .sr-snippet{font-size:12.5px;color:var(--ink-dim);line-height:1.5;margin-top:2px}
+.search-result .sr-snippet mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 2px}
 .modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:20px 22px 8px}
 .modal-head h3{font-size:18px}
 .modal-head .x{background:none;border:none;color:var(--ink-dim);font-size:20px;cursor:pointer;line-height:1;padding:2px 6px}
@@ -185,6 +204,13 @@ tbody tr:hover{background:var(--surface-2)}
     <div class="stat"><div class="label">Warrants on file</div><div class="value mono" id="statCount">—</div><div class="foot" id="statCountFoot">&nbsp;</div></div>
     <div class="stat"><div class="label">Top vendor</div><div class="value" id="statTopVendor" style="font-size:16px;font-family:var(--font-display);font-weight:700">—</div><div class="foot" id="statTopVendorFoot">&nbsp;</div></div>
     <div class="stat"><div class="label">Top category</div><div class="value" id="statTopCat" style="font-size:16px;font-family:var(--font-display);font-weight:700">—</div><div class="foot" id="statTopCatFoot">&nbsp;</div></div>
+    <div class="stat" id="statReviewTile" data-clickable title="Click to see which warrants and why."><div class="label">Needs review</div><div class="value mono" id="statReview">—</div><div class="foot" id="statReviewFoot">&nbsp;</div></div>
+  </section>
+
+  <section class="panel" style="margin-bottom:20px">
+    <div class="panel-head"><h2>Search bill schedules</h2><span class="hint">Full text of every stored PDF — vendor names, PO numbers, dollar amounts, anything printed on the page</span></div>
+    <input class="search" id="pdfSearch" placeholder="Search invoice text (e.g. a PO number, an exact amount, a vendor)…">
+    <div id="searchResults" hidden></div>
   </section>
 
   <section class="split">
@@ -208,6 +234,19 @@ tbody tr:hover{background:var(--surface-2)}
       </div>
       <div class="scroll-box"><div id="vendorBody" style="padding:4px 10px"></div></div>
     </div>
+  </section>
+
+  <section class="panel" id="trendsPanel" style="margin-bottom:20px">
+    <div class="panel-head">
+      <h2>Spending trends</h2>
+      <span class="hint" id="trendsHint"></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin:2px 0 10px">
+      <label for="trendsFy" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-dim);font-weight:600">Fiscal year</label>
+      <select id="trendsFy"></select>
+      <span style="font-size:11.5px;color:var(--ink-dim)">compared to the fiscal year before it (July–June)</span>
+    </div>
+    <div id="trendsBody"></div>
   </section>
 
   <section class="panel">
@@ -370,6 +409,29 @@ tbody tr:hover{background:var(--surface-2)}
   </div>
 </div>
 
+<!-- Needs-review queue modal -->
+<div class="modal" id="reviewQueueModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <div><h3>Needs review</h3><div class="desc" id="rqSub"></div></div>
+      <button class="x" id="reviewQueueClose" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="scroll-box">
+        <table class="mini-table">
+          <thead><tr>
+            <th title="Warrant date.">Date</th>
+            <th title="Warrant number.">#</th>
+            <th style="text-align:right" title="Total dollar amount stated on the warrant.">Total</th>
+            <th title="Why this warrant is flagged.">Flagged because</th>
+          </tr></thead>
+          <tbody id="rqBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast" hidden></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -470,6 +532,32 @@ function isoToLabel(iso){
   return m + "/" + d + "/" + y.slice(2);
 }
 
+// Massachusetts school district fiscal year: July 1–June 30, named for the
+// calendar year it ENDS in (e.g. July 2025–June 2026 is "FY26").
+function fiscalYear(dateISO){
+  if (!dateISO) return null;
+  const [y, m] = dateISO.split("-").map(Number);
+  if (!y || !m) return null;
+  return m >= 7 ? y + 1 : y;
+}
+function fyLabel(fy){ return fy == null ? "—" : "FY" + String(fy).slice(-2); }
+
+// A warrant is flagged if its batch rows don't reconcile with the stated
+// total, if it's not full-detail (seeded/legacy data), or if its category
+// rows were guessed from vendor line items rather than a real batch-summary
+// table (the same "—" batch marker openReview()'s fallback synthesis uses).
+function reviewFlags(w){
+  const flags = [];
+  if (w.reconciled === false) flags.push({ key: "mismatch", label: "Reconciliation mismatch" });
+  if (w.quality && w.quality !== "full") flags.push({ key: "partial", label: "Not full detail (" + w.quality + ")" });
+  const rows = w.summaryRows || [];
+  if (rows.length && rows.every(r => r.batch === "—")) flags.push({ key: "synthesized", label: "Category rows guessed from line items" });
+  return flags;
+}
+function computeNeedsReview(ws){
+  return ws.map(w => ({ w, flags: reviewFlags(w) })).filter(x => x.flags.length);
+}
+
 /* ---------------------------------------------------------------- *
  * App state — backed by this server's /api/warrants, not a platform
  * capability. There's no live subscription: every save just refetches.
@@ -561,6 +649,7 @@ function renderAll(){
   renderStats();
   renderCategoryPanel();
   renderVendorPanel($("#vendorSearch").value || "");
+  renderTrends();
   renderWarrantTable();
 }
 
@@ -598,6 +687,10 @@ function renderStats(){
     $("#statTopCat").textContent = "—";
     $("#statTopCatFoot").textContent = "awaiting category data";
   }
+
+  const flagged = computeNeedsReview(ws);
+  $("#statReview").textContent = String(flagged.length);
+  $("#statReviewFoot").textContent = flagged.length ? "mismatch, partial, or guessed rows" : ws.length ? "nothing flagged" : " ";
 }
 
 function aggregateCategories(ws){
@@ -680,6 +773,69 @@ function renderVendorPanel(filter){
       '<div class="pct">' + (totalAll ? (amt / totalAll * 100).toFixed(1) : "0.0") + '%</div></div>'
   )).join("");
 }
+
+// FY -> { category: amount }, summed from each warrant's saved category
+// totals (same data "Spending by category" uses, just split by fiscal year
+// instead of collapsed across every warrant on file).
+function categoryTotalsByFY(ws){
+  const out = {};
+  ws.forEach(w => {
+    const fy = fiscalYear(w.dateISO);
+    if (fy == null) return;
+    if (!out[fy]) out[fy] = {};
+    Object.entries(w.categories || {}).forEach(([k, v]) => { out[fy][k] = (out[fy][k] || 0) + (Number(v) || 0); });
+  });
+  return out;
+}
+let trendsFy = null; // null = not yet chosen; defaults to the most recent FY with data
+function renderTrends(){
+  const ws = allWarrants();
+  const byFy = categoryTotalsByFY(ws);
+  const fys = Object.keys(byFy).map(Number).sort((a, b) => b - a);
+  const sel = $("#trendsFy");
+  const hint = $("#trendsHint");
+  const body = $("#trendsBody");
+
+  if (!fys.length) {
+    sel.innerHTML = "";
+    hint.textContent = "";
+    body.innerHTML = '<div class="empty"><b>No dated category data yet</b>Trends fill in once warrants with category totals are on file.</div>';
+    return;
+  }
+  if (trendsFy == null || !fys.includes(trendsFy)) trendsFy = fys[0];
+  sel.innerHTML = fys.map(fy => '<option value="' + fy + '"' + (fy === trendsFy ? " selected" : "") + '>' + fyLabel(fy) + '</option>').join("");
+
+  const cur = byFy[trendsFy] || {};
+  const prior = byFy[trendsFy - 1] || {};
+  const names = CATEGORIES.filter(c => (cur[c] || 0) > 0 || (prior[c] || 0) > 0);
+  if (!names.length) {
+    hint.textContent = "";
+    body.innerHTML = '<div class="empty"><b>No category data for ' + fyLabel(trendsFy) + '</b></div>';
+    return;
+  }
+  const curTotal = Object.values(cur).reduce((s, v) => s + v, 0);
+  hint.textContent = fyLabel(trendsFy) + ": " + fmtMoney(curTotal) + (fys.includes(trendsFy - 1) ? " — vs " + fyLabel(trendsFy - 1) + " below" : " (no prior FY on file to compare)");
+  const max = Math.max(1, ...names.map(n => cur[n] || 0));
+  const rows = names.sort((a, b) => (cur[b] || 0) - (cur[a] || 0));
+  body.innerHTML = rows.map(name => {
+    const c = cur[name] || 0, p = prior[name] || 0;
+    let delta = "";
+    if (p > 0) {
+      const pct = ((c - p) / p) * 100;
+      delta = '<span class="delta ' + (pct >= 0 ? "up" : "down") + '">' + (pct >= 0 ? "▲" : "▼") + " " + Math.abs(pct).toFixed(0) + "%</span>";
+    } else if (c > 0) {
+      delta = '<span class="delta up" title="No spending in this category last FY">new</span>';
+    }
+    return '<div class="trend-row">' +
+      '<div class="name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + Math.max(2, (c / max) * 100) + '%"></div></div>' +
+      '<div class="amt">' + fmtMoney(c) + '</div>' +
+      '<div class="amt dim" title="' + fyLabel(trendsFy - 1) + '">' + (p > 0 ? fmtMoney(p) : "—") + '</div>' +
+      '<div class="delta">' + delta + '</div>' +
+    '</div>';
+  }).join("");
+}
+$("#trendsFy").addEventListener("change", (e) => { trendsFy = Number(e.target.value); renderTrends(); });
 
 function renderWarrantTable(){
   let ws = Array.from(state.warrants.entries());
@@ -859,6 +1015,80 @@ $("#vendorBody").addEventListener("click", (e) => {
 });
 $("#vendorDetailClose").addEventListener("click", () => { $("#vendorDetailModal").hidden = true; });
 $("#vendorDetailModal").addEventListener("click", (e) => { if (e.target.id === "vendorDetailModal") $("#vendorDetailModal").hidden = true; });
+
+// The "Needs review" stat tile opens this queue instead of a running count
+// being the only thing you ever see — each row says why it's flagged and
+// clicking it jumps straight to that warrant's own detail view.
+function openReviewQueue(){
+  const flagged = computeNeedsReview(allWarrants());
+  flagged.sort((a, b) => (b.w.dateISO || "").localeCompare(a.w.dateISO || ""));
+  $("#rqSub").textContent = flagged.length
+    ? flagged.length + " warrant" + (flagged.length === 1 ? "" : "s") + " flagged"
+    : "Nothing flagged — every warrant on file reconciles with full detail.";
+  $("#rqBody").innerHTML = flagged.length ? flagged.map(({ w, flags }) => (
+    '<tr data-id="' + escapeHtml(w.id) + '">' +
+      '<td class="mono">' + escapeHtml(w.label || isoToLabel(w.dateISO)) + '</td>' +
+      '<td class="mono">' + escapeHtml(w.warrantNo || "—") + '</td>' +
+      '<td style="text-align:right" class="mono">' + fmtMoney(w.total) + '</td>' +
+      '<td>' + flags.map(f => '<span class="badge warn" style="margin-right:4px">' + escapeHtml(f.label) + '</span>').join("") + '</td>' +
+    '</tr>'
+  )).join("") : '<tr><td colspan="4" style="text-align:center;color:var(--ink-dim);padding:16px 0">Nothing to show.</td></tr>';
+  $$("tr[data-id]", $("#rqBody")).forEach(tr => tr.addEventListener("click", () => {
+    $("#reviewQueueModal").hidden = true;
+    openDetail(tr.dataset.id);
+  }));
+  $("#reviewQueueModal").hidden = false;
+}
+$("#statReviewTile").addEventListener("click", openReviewQueue);
+$("#reviewQueueClose").addEventListener("click", () => { $("#reviewQueueModal").hidden = true; });
+$("#reviewQueueModal").addEventListener("click", (e) => { if (e.target.id === "reviewQueueModal") $("#reviewQueueModal").hidden = true; });
+
+/* ---------------------------------------------------------------- *
+ * Full-text search across every stored PDF (server-side index via
+ * pdftotext) — vendor names, PO numbers, exact dollar amounts, anything
+ * printed on the page, not just what made it into a category/vendor row.
+ * ---------------------------------------------------------------- */
+function highlightSnippet(s, q){
+  const esc = escapeHtml(s);
+  const qEsc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return esc.replace(new RegExp("(" + qEsc.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "ig"), "<mark>$1</mark>");
+}
+let searchDebounce = null;
+async function runPdfSearch(q){
+  const box = $("#searchResults");
+  if (!q || q.trim().length < 3) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = '<div class="empty" style="padding:10px 0">Searching…</div>';
+  let data;
+  try {
+    const res = await fetch("/api/search?q=" + encodeURIComponent(q.trim()));
+    data = await res.json();
+  } catch (e) {
+    box.innerHTML = '<div class="empty" style="padding:10px 0">Search failed — try again.</div>';
+    return;
+  }
+  const results = data.results || [];
+  if (!results.length) {
+    box.innerHTML = '<div class="empty" style="padding:10px 0"><b>No matches</b>Nothing in any stored PDF’s text matches that. Warrants uploaded before full-text search existed need <span class="mono">scripts/backfill-pdf-text.js</span> run once to be searchable.</div>';
+    return;
+  }
+  box.innerHTML = results.map(r => (
+    '<div class="search-result">' +
+      '<div class="sr-head">' +
+        '<span class="sr-title">' + escapeHtml(r.label || isoToLabel(r.dateISO)) + (r.warrantNo ? ' · Warrant #' + escapeHtml(r.warrantNo) : '') + '</span>' +
+        '<span class="sr-count">' + r.matchCount + ' match' + (r.matchCount === 1 ? "" : "es") +
+          (r.hasSourcePdf ? ' · <a href="/api/warrants/' + encodeURIComponent(r.id) + '/source" target="_blank" rel="noopener">View PDF</a>' : '') +
+        '</span>' +
+      '</div>' +
+      r.snippets.map(s => '<div class="sr-snippet">' + highlightSnippet(s, q.trim()) + '</div>').join("") +
+    '</div>'
+  )).join("");
+}
+$("#pdfSearch").addEventListener("input", (e) => {
+  clearTimeout(searchDebounce);
+  const q = e.target.value;
+  searchDebounce = setTimeout(() => runPdfSearch(q), 300);
+});
 
 $("#vendorSearch").addEventListener("input", (e) => renderVendorPanel(e.target.value));
 

@@ -14,6 +14,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 const Database = require("better-sqlite3");
 
 const PORT = process.env.PORT || 3000;
@@ -61,6 +62,16 @@ db.exec(`
   // same idea as summaryRows but for vendors — lets a vendor be clicked into
   // just like a category can. Missing on warrants saved before this existed.
   if (!cols.includes("lineItems")) db.exec("ALTER TABLE warrants ADD COLUMN lineItems TEXT");
+  // pdfText: the full plain text of the stored source PDF (via pdftotext),
+  // used only server-side by /api/search — never sent in the main warrant
+  // list, since it can be large. Missing until a PDF is (re-)uploaded or
+  // scripts/backfill-pdf-text.js is run.
+  if (!cols.includes("pdfText")) db.exec("ALTER TABLE warrants ADD COLUMN pdfText TEXT");
+}
+
+// Escapes % _ and \ for a LIKE pattern using \ as the escape character.
+function likeEscape(s) {
+  return String(s).replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
 function rowToWarrant(row) {
@@ -197,11 +208,24 @@ app.post("/api/warrants/:id/source", (req, res) => {
   for (const f of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, f));
   const safeName = (filename || "warrant.pdf").replace(/[^A-Za-z0-9 ._-]/g, "_").slice(0, 150) || "warrant.pdf";
   const storedName = crypto.randomBytes(4).toString("hex") + "-" + safeName;
-  fs.writeFileSync(path.join(dir, storedName), buf);
+  const storedPath = path.join(dir, storedName);
+  fs.writeFileSync(storedPath, buf);
 
-  db.prepare("UPDATE warrants SET sourcePdfPath = ?, sourceFile = ?, updatedAt = ? WHERE id = ?").run(
+  // Index the PDF's text for /api/search. Best-effort: if poppler-utils
+  // isn't in this image yet (pre-dates its addition to the Dockerfile), the
+  // upload still succeeds — the warrant just won't be searchable until the
+  // image is rebuilt and scripts/backfill-pdf-text.js is run once.
+  let pdfText = null;
+  try {
+    pdfText = execFileSync("pdftotext", [storedPath, "-"], { maxBuffer: 20 * 1024 * 1024 }).toString("utf8");
+  } catch (e) {
+    console.error(`pdftotext failed for warrant ${id} — it won't be full-text searchable: ${(e && e.message) || e}`);
+  }
+
+  db.prepare("UPDATE warrants SET sourcePdfPath = ?, sourceFile = ?, pdfText = ?, updatedAt = ? WHERE id = ?").run(
     path.join(id, storedName),
     filename || existing.sourceFile,
+    pdfText,
     new Date().toISOString(),
     id
   );
@@ -216,6 +240,40 @@ app.get("/api/warrants/:id/source", (req, res) => {
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${(row.sourceFile || "warrant.pdf").replace(/"/g, "")}"`);
   fs.createReadStream(filePath).pipe(res);
+});
+
+// Full-text search across every stored PDF's extracted text (see pdfText
+// above). pdfText itself never leaves the server — only short snippets
+// around each match do, since a warrant's PDF text can be large and this
+// isn't meant to be a bulk export.
+app.get("/api/search", (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (q.length < 3) return res.json({ results: [] });
+  const pattern = "%" + likeEscape(q) + "%";
+  const rows = db.prepare("SELECT id, dateISO, warrantNo, label, pdfText, sourcePdfPath FROM warrants WHERE pdfText LIKE ? ESCAPE '\\'").all(pattern);
+  const needle = q.toLowerCase();
+  const results = rows.slice(0, 30).map((row) => {
+    const text = row.pdfText || "";
+    const lower = text.toLowerCase();
+    const snippets = [];
+    let idx = lower.indexOf(needle);
+    while (idx !== -1 && snippets.length < 3) {
+      const start = Math.max(0, idx - 50);
+      const end = Math.min(text.length, idx + needle.length + 50);
+      snippets.push((start > 0 ? "…" : "") + text.slice(start, end).replace(/\s+/g, " ").trim() + (end < text.length ? "…" : ""));
+      idx = lower.indexOf(needle, idx + needle.length);
+    }
+    return {
+      id: row.id,
+      dateISO: row.dateISO,
+      warrantNo: row.warrantNo,
+      label: row.label,
+      hasSourcePdf: Boolean(row.sourcePdfPath),
+      matchCount: (lower.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length,
+      snippets,
+    };
+  });
+  res.json({ results });
 });
 
 app.delete("/api/warrants/:id", (req, res) => {
