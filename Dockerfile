@@ -13,6 +13,7 @@ RUN npm install --omit=dev
 
 COPY server.js ./
 COPY public ./public
+COPY scripts ./scripts
 
 ENV PORT=3000
 EXPOSE 3000
