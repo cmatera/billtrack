@@ -7,7 +7,7 @@ This is a self-hosted port of a [claude.ai Artifact](https://claude.ai) version 
 - **Storage**: a SQLite database on disk (`data/warrants.db`), mounted as a Docker volume so it survives container rebuilds.
 - **PDF reading**: a direct call to the [Anthropic API](https://console.anthropic.com/) from the server, using your own API key. This is billed to your account — a typical warrant (40-90 pages, read in batches of 6) costs on the order of a few cents per upload.
 
-Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later.
+Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later. Click any row in "Spending by category" to drill into every batch-summary row saved under that category, across every warrant, each with a link straight to its source PDF.
 
 Everything else — the category taxonomy, vendor normalization, the review-before-save flow, sortable/resizable columns — is the same frontend code.
 

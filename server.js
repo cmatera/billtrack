@@ -39,6 +39,7 @@ db.exec(`
     invoiceCount INTEGER,
     categories TEXT,
     vendors TEXT,
+    summaryRows TEXT,
     quality TEXT,
     reconciled INTEGER,
     source TEXT,
@@ -49,6 +50,13 @@ db.exec(`
     updatedAt TEXT
   )
 `);
+// Migrate an existing database (e.g. already deployed and in use) that
+// predates the summaryRows column — CREATE TABLE IF NOT EXISTS above is a
+// no-op against it, so add the column directly if it's missing.
+{
+  const cols = db.prepare("PRAGMA table_info(warrants)").all().map((c) => c.name);
+  if (!cols.includes("summaryRows")) db.exec("ALTER TABLE warrants ADD COLUMN summaryRows TEXT");
+}
 
 function rowToWarrant(row) {
   if (!row) return undefined;
@@ -61,6 +69,11 @@ function rowToWarrant(row) {
     invoiceCount: row.invoiceCount,
     categories: row.categories ? JSON.parse(row.categories) : {},
     vendors: row.vendors ? JSON.parse(row.vendors) : {},
+    // Per-row detail behind the category totals (one row per included
+    // batch-summary row) — lets the UI drill from a category into the
+    // individual rows that made it up, each traceable to its warrant's
+    // source PDF. Absent on warrants saved before this was added.
+    summaryRows: row.summaryRows ? JSON.parse(row.summaryRows) : [],
     quality: row.quality,
     reconciled: row.reconciled === null ? null : Boolean(row.reconciled),
     source: row.source,
@@ -127,6 +140,7 @@ app.put("/api/warrants/:id", (req, res) => {
     invoiceCount: body.invoiceCount ?? null,
     categories: JSON.stringify(body.categories || {}),
     vendors: JSON.stringify(body.vendors || {}),
+    summaryRows: JSON.stringify(Array.isArray(body.summaryRows) ? body.summaryRows : []),
     quality: body.quality ?? null,
     reconciled: body.reconciled === null || body.reconciled === undefined ? null : body.reconciled ? 1 : 0,
     source: body.source ?? null,
@@ -137,12 +151,12 @@ app.put("/api/warrants/:id", (req, res) => {
     updatedAt: now,
   };
   db.prepare(
-    `INSERT INTO warrants (id, dateISO, warrantNo, label, total, invoiceCount, categories, vendors, quality, reconciled, source, sourceFile, sourcePdfPath, notes, createdAt, updatedAt)
-     VALUES (@id, @dateISO, @warrantNo, @label, @total, @invoiceCount, @categories, @vendors, @quality, @reconciled, @source, @sourceFile, @sourcePdfPath, @notes, @createdAt, @updatedAt)
+    `INSERT INTO warrants (id, dateISO, warrantNo, label, total, invoiceCount, categories, vendors, summaryRows, quality, reconciled, source, sourceFile, sourcePdfPath, notes, createdAt, updatedAt)
+     VALUES (@id, @dateISO, @warrantNo, @label, @total, @invoiceCount, @categories, @vendors, @summaryRows, @quality, @reconciled, @source, @sourceFile, @sourcePdfPath, @notes, @createdAt, @updatedAt)
      ON CONFLICT(id) DO UPDATE SET
        dateISO=excluded.dateISO, warrantNo=excluded.warrantNo, label=excluded.label, total=excluded.total,
        invoiceCount=excluded.invoiceCount, categories=excluded.categories, vendors=excluded.vendors,
-       quality=excluded.quality, reconciled=excluded.reconciled, source=excluded.source,
+       summaryRows=excluded.summaryRows, quality=excluded.quality, reconciled=excluded.reconciled, source=excluded.source,
        sourceFile=excluded.sourceFile, notes=excluded.notes, updatedAt=excluded.updatedAt`
   ).run(row);
   res.json({ ok: true, id });
