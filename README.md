@@ -24,10 +24,33 @@ A fresh install starts with an empty ledger — nothing is seeded. Upload your f
 ```
 server.js              Express app: static file server + /api routes
 public/index.html      The whole frontend (single file, no build step)
+scripts/               One-time maintenance scripts (see below)
 data/warrants.db       The live SQLite store (gitignored; created at runtime)
 data/uploads/<id>/     Original source PDFs, one folder per warrant (gitignored)
 Dockerfile, docker-compose.yml
 ```
+
+### Backfilling category drill-down detail for older warrants
+
+Warrants uploaded before the per-row `summaryRows` detail existed only have
+the old aggregate category/vendor totals — clicking into a category for one
+of them shows "No row-level detail saved." Since the original PDF is still
+on disk for any warrant that was uploaded through the browser, you don't
+need to re-upload it: `scripts/backfill-summary-rows.js` re-reads the stored
+PDF directly and re-runs the same extraction, filling in just the
+`summaryRows` detail (it never touches the totals or categories you already
+have). Run it inside the container, with the server already up:
+
+```
+docker compose exec ledger node scripts/backfill-summary-rows.js --dry-run   # preview first
+docker compose exec ledger node scripts/backfill-summary-rows.js            # then for real
+```
+
+It only processes warrants that have a stored source PDF and no existing
+`summaryRows`, so it's safe to run more than once. Each warrant it touches
+costs about the same as a normal upload (a few cents of Anthropic API
+usage). Flags: `--id=<warrant-id>` to backfill just one, `--force` to redo
+one that already has detail.
 
 ## API
 
