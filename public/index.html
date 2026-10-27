@@ -150,7 +150,6 @@ tbody tr:hover{background:var(--surface-2)}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);font-size:13px;padding:10px 18px;border-radius:999px;z-index:60;max-width:90vw;box-shadow:0 10px 30px rgba(0,0,0,.3)}
 .toast.bad{background:var(--bad)}
 .toast.good{background:var(--good)}
-.footer-note{font-size:11.5px;color:var(--ink-dim);text-align:center;margin-top:10px}
 .quality-tag{font-size:10px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;color:var(--ink-dim)}
 </style>
 </head>
@@ -178,7 +177,7 @@ tbody tr:hover{background:var(--surface-2)}
 
   <section class="stats" id="statGrid">
     <div class="stat"><div class="label">Total tracked</div><div class="value mono" id="statTotal">—</div><div class="foot" id="statTotalFoot">&nbsp;</div></div>
-    <div class="stat"><div class="label">Warrants on file</div><div class="value mono" id="statCount">—</div><div class="foot">of 20 to date</div></div>
+    <div class="stat"><div class="label">Warrants on file</div><div class="value mono" id="statCount">—</div><div class="foot" id="statCountFoot">&nbsp;</div></div>
     <div class="stat"><div class="label">Top vendor</div><div class="value" id="statTopVendor" style="font-size:16px;font-family:var(--font-display);font-weight:700">—</div><div class="foot" id="statTopVendorFoot">&nbsp;</div></div>
     <div class="stat"><div class="label">Top category</div><div class="value" id="statTopCat" style="font-size:16px;font-family:var(--font-display);font-weight:700">—</div><div class="foot" id="statTopCatFoot">&nbsp;</div></div>
   </section>
@@ -227,7 +226,6 @@ tbody tr:hover{background:var(--surface-2)}
     </div>
   </section>
 
-  <p class="footer-note">Historical warrants (#04–#23) were seeded from the committee's existing review; totals and Amazon figures are confirmed, but full per-vendor and per-category detail only exists for warrants re-processed through the upload tool above.</p>
 </main>
 
 <!-- Upload progress overlay -->
@@ -509,6 +507,12 @@ function renderStats(){
   $("#statTotal").textContent = ws.length ? fmtMoney(total) : "—";
   $("#statTotalFoot").textContent = ws.length ? "across " + ws.length + " warrant" + (ws.length === 1 ? "" : "s") : "no warrants yet";
   $("#statCount").textContent = String(ws.length);
+  if (ws.length) {
+    const dates = ws.map(w => w.dateISO).filter(Boolean).sort();
+    $("#statCountFoot").textContent = dates.length ? isoToLabel(dates[0]) + " – " + isoToLabel(dates[dates.length - 1]) : " ";
+  } else {
+    $("#statCountFoot").textContent = "upload a bill schedule to start";
+  }
 
   const vendTotals = aggregateVendors(ws);
   const topVendor = Object.entries(vendTotals).sort((a, b) => b[1] - a[1])[0];
@@ -664,6 +668,12 @@ function openDetail(id){
   const cats = Object.entries(w.categories || {}).sort((a, b) => b[1] - a[1]);
   const vends = Object.entries(w.vendors || {}).sort((a, b) => b[1] - a[1]);
   let html = "";
+  if (w.hasSourcePdf) {
+    html += '<a class="btn" style="margin-bottom:14px;text-decoration:none" href="/api/warrants/' + encodeURIComponent(id) + '/source" target="_blank" rel="noopener" title="Opens the original bill schedule PDF this warrant was extracted from.">View source PDF' +
+      (w.sourceFile ? ' <span style="color:var(--ink-dim);font-weight:400">— ' + escapeHtml(w.sourceFile) + '</span>' : '') + '</a>';
+  } else if (w.sourceFile) {
+    html += '<div style="margin-bottom:14px;font-size:11.5px;color:var(--ink-dim)" title="The filename was recorded, but the PDF itself wasn\'t saved — likely uploaded before source-PDF storage was added.">Source: ' + escapeHtml(w.sourceFile) + ' (original file not stored)</div>';
+  }
   html += '<h3 style="font-size:13.5px;margin-bottom:8px">By category</h3>';
   html += cats.length
     ? '<table class="mini-table">' + cats.map(([k, v]) => '<tr><td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>').join("") + '</table>'
@@ -740,7 +750,7 @@ async function processFile(file){
   const merged = await extractWarrant(images, (note, pct) => updateOverlay(note, pct));
   hideOverlay();
   if (!merged) return; // cancelled or failed; already toasted
-  openReview(merged, file.name);
+  openReview(merged, file);
 }
 
 async function renderPdfToImages(file, onProgress){
@@ -886,7 +896,7 @@ function resolveWarrantId(dateISO, total){
 
 let reviewCtx = null;
 
-function openReview(merged, filename){
+function openReview(merged, file){
   const summaryRows = (merged.summaryRows || []).map(r => ({
     batch: r.batch || "", department: r.department || "", amount: Number(r.amount) || 0,
     category: categorize(r.department), include: true,
@@ -895,9 +905,9 @@ function openReview(merged, filename){
     vendor: r.vendor || "", description: r.description || "", amount: Number(r.amount) || 0, include: true,
   }));
   const dateISO = mmddyyyyToISO(merged.coverDate);
-  reviewCtx = { merged, summaryRows, lineItems, filename, dup: null };
+  reviewCtx = { merged, summaryRows, lineItems, file, filename: file.name, dup: null };
 
-  $("#reviewFileName").textContent = filename;
+  $("#reviewFileName").textContent = file.name;
   $("#rvDate").value = dateISO || "";
   $("#rvNo").value = merged.warrantNo || "";
   $("#rvTotal").value = merged.coverTotal != null ? merged.coverTotal : "";
@@ -983,6 +993,10 @@ $("#reviewSave").addEventListener("click", async () => {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error || "save failed");
     }
+    await uploadSourcePdf(id, reviewCtx.file).catch(err => {
+      console.error(err);
+      toast("Saved, but couldn't store the source PDF for later reference.", "bad");
+    });
     await loadWarrants();
     toast("Saved " + record.label + " to the ledger.", "good");
     closeReview();
@@ -990,6 +1004,28 @@ $("#reviewSave").addEventListener("click", async () => {
     toast("Couldn't save — " + (e && e.message ? e.message : "try again."), "bad");
   }
 });
+
+// Stores the original uploaded PDF alongside the warrant record, so it can
+// be reopened later from the detail view for reference.
+async function uploadSourcePdf(id, file){
+  if (!file) return;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  const res = await fetch("/api/warrants/" + encodeURIComponent(id) + "/source", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ filename: file.name, mediaType: "application/pdf", data: base64 }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "source upload failed");
+  }
+}
 
 /* ---------------------------------------------------------------- *
  * Boot

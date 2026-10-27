@@ -5,12 +5,13 @@
   "private": true,
   "main": "server.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "better-sqlite3": "^12.4.1",
     "express": "^4.19.2"
   }
 }

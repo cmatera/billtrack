@@ -4,26 +4,28 @@ A self-hosted tracker for Sutton Public Schools bill schedule ("warrant") PDFs. 
 
 This is a self-hosted port of a [claude.ai Artifact](https://claude.ai) version of the same tool. The artifact version got two things for free from the claude.ai platform: a shared database and an AI call to read PDF pages. Neither exists outside claude.ai, so this version replaces them with:
 
-- **Storage**: a JSON file on disk (`data/warrants.json`), mounted as a Docker volume so it survives container rebuilds.
+- **Storage**: a SQLite database on disk (`data/warrants.db`), mounted as a Docker volume so it survives container rebuilds.
 - **PDF reading**: a direct call to the [Anthropic API](https://console.anthropic.com/) from the server, using your own API key. This is billed to your account — a typical warrant (40-90 pages, read in batches of 6) costs on the order of a few cents per upload.
+
+Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later.
 
 Everything else — the category taxonomy, vendor normalization, the review-before-save flow, sortable/resizable columns — is the same frontend code.
 
 ## Running it
 
-1. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` (get one at [console.anthropic.com](https://console.anthropic.com/)). Leave it blank to run read-only (the seeded ledger below still works; uploads are disabled until a key is set).
+1. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` (get one at [console.anthropic.com](https://console.anthropic.com/)). Leave it blank to run read-only (uploads are disabled until a key is set).
 2. `docker compose up -d --build`
 3. Open `http://localhost:3000`
 
-The container seeds `data/warrants.json` from `seed/warrants.seed.json` on first run only — the 20 historical warrants the committee had already reviewed by hand (confirmed totals and known vendors; no per-warrant category split, since that was never verified at that granularity for the older warrants). Uploading a bill schedule through the tool adds full category + vendor detail for that warrant going forward.
+A fresh install starts with an empty ledger — nothing is seeded. Upload your first bill schedule through the tool to get started; each one you confirm through the review step adds full category + vendor detail, plus the source PDF for later reference.
 
 ## Project layout
 
 ```
 server.js              Express app: static file server + /api routes
 public/index.html      The whole frontend (single file, no build step)
-seed/warrants.seed.json  Initial data, copied into data/ on first run
-data/warrants.json     The live store (gitignored; created at runtime)
+data/warrants.db       The live SQLite store (gitignored; created at runtime)
+data/uploads/<id>/     Original source PDFs, one folder per warrant (gitignored)
 Dockerfile, docker-compose.yml
 ```
 
@@ -32,7 +34,9 @@ Dockerfile, docker-compose.yml
 - `GET /api/config` — `{ extractionEnabled: boolean }`, whether `ANTHROPIC_API_KEY` is set.
 - `GET /api/warrants` — all warrant records.
 - `PUT /api/warrants/:id` — replace one warrant record (used by the review modal's "Save to ledger").
-- `DELETE /api/warrants/:id` — remove one.
+- `POST /api/warrants/:id/source` — `{ filename, mediaType, data }` (base64) → stores the original PDF for an already-saved warrant. Internal to the frontend.
+- `GET /api/warrants/:id/source` — streams the stored PDF back (opens inline in the browser).
+- `DELETE /api/warrants/:id` — remove one warrant record and its stored source PDF.
 - `GET /api/export.csv` — category + vendor totals as a CSV download.
 - `POST /api/extract` — `{ prompt, images: [{data, mediaType}] }` → calls the Anthropic API with the page images and returns the parsed JSON reply. Internal to the frontend; not meant to be called directly.
 

@@ -1,39 +1,79 @@
 // Sutton Bill Ledger — self-hosted server.
 //
 // Replaces the two things the claude.ai Artifact version got for free from
-// the platform: a shared database (here: a JSON file on disk) and an AI
+// the platform: a shared database (here: a SQLite file on disk) and an AI
 // call to read PDF pages (here: a direct call to the Anthropic API using
 // your own key). Everything else — the categorization taxonomy, the
 // review-before-save flow, the dashboard — is the same frontend logic.
+//
+// A fresh install starts with an empty ledger — nothing is seeded. Each
+// saved warrant keeps the original uploaded PDF on disk (data/uploads/<id>/)
+// so you can reopen the source document later from the warrant's detail view.
 
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const Database = require("better-sqlite3");
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-const DB_FILE = path.join(DATA_DIR, "warrants.json");
-const SEED_FILE = path.join(__dirname, "seed", "warrants.seed.json");
+const DB_FILE = path.join(DATA_DIR, "warrants.db");
+const UPLOADS_DIR = path.join(DATA_DIR, "uploads");
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5";
+const MAX_SOURCE_BYTES = 30 * 1024 * 1024; // 30MB — generous for a scanned bill schedule
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(DB_FILE)) {
-  const seed = fs.existsSync(SEED_FILE) ? fs.readFileSync(SEED_FILE, "utf8") : "{}";
-  fs.writeFileSync(DB_FILE, seed);
-  console.log("Seeded", DB_FILE, "from", SEED_FILE);
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+const db = new Database(DB_FILE);
+db.pragma("journal_mode = WAL");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS warrants (
+    id TEXT PRIMARY KEY,
+    dateISO TEXT,
+    warrantNo TEXT,
+    label TEXT,
+    total REAL,
+    invoiceCount INTEGER,
+    categories TEXT,
+    vendors TEXT,
+    quality TEXT,
+    reconciled INTEGER,
+    source TEXT,
+    sourceFile TEXT,
+    sourcePdfPath TEXT,
+    notes TEXT,
+    createdAt TEXT,
+    updatedAt TEXT
+  )
+`);
+
+function rowToWarrant(row) {
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    dateISO: row.dateISO,
+    warrantNo: row.warrantNo,
+    label: row.label,
+    total: row.total,
+    invoiceCount: row.invoiceCount,
+    categories: row.categories ? JSON.parse(row.categories) : {},
+    vendors: row.vendors ? JSON.parse(row.vendors) : {},
+    quality: row.quality,
+    reconciled: row.reconciled === null ? null : Boolean(row.reconciled),
+    source: row.source,
+    sourceFile: row.sourceFile || null,
+    hasSourcePdf: Boolean(row.sourcePdfPath),
+    notes: row.notes || undefined,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
-function readDb() {
-  try {
-    return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-  } catch (e) {
-    console.error("Failed to read db file, starting empty:", e.message);
-    return {};
-  }
-}
-function writeDb(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+function getWarrantRow(id) {
+  return db.prepare("SELECT * FROM warrants WHERE id = ?").get(id);
 }
 
 // Tolerant JSON extraction from a Claude reply: the whole reply, or a
@@ -60,7 +100,7 @@ function tolerantJsonParse(text) {
 }
 
 const app = express();
-app.use(express.json({ limit: "45mb" })); // batches of page images as base64 add up
+app.use(express.json({ limit: "45mb" })); // batches of page images / a source PDF as base64 add up
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/config", (req, res) => {
@@ -68,29 +108,103 @@ app.get("/api/config", (req, res) => {
 });
 
 app.get("/api/warrants", (req, res) => {
-  const db = readDb();
-  res.json(Object.entries(db).map(([id, data]) => ({ id, ...data })));
+  const rows = db.prepare("SELECT * FROM warrants ORDER BY dateISO").all();
+  res.json(rows.map(rowToWarrant));
 });
 
 app.put("/api/warrants/:id", (req, res) => {
-  const db = readDb();
   const id = req.params.id;
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return res.status(400).json({ error: "bad id" });
-  db[id] = { ...req.body, updatedAt: new Date().toISOString() };
-  writeDb(db);
+  const existing = getWarrantRow(id);
+  const body = req.body || {};
+  const now = new Date().toISOString();
+  const row = {
+    id,
+    dateISO: body.dateISO ?? null,
+    warrantNo: body.warrantNo ?? null,
+    label: body.label ?? null,
+    total: body.total ?? null,
+    invoiceCount: body.invoiceCount ?? null,
+    categories: JSON.stringify(body.categories || {}),
+    vendors: JSON.stringify(body.vendors || {}),
+    quality: body.quality ?? null,
+    reconciled: body.reconciled === null || body.reconciled === undefined ? null : body.reconciled ? 1 : 0,
+    source: body.source ?? null,
+    sourceFile: body.sourceFile ?? (existing ? existing.sourceFile : null),
+    sourcePdfPath: existing ? existing.sourcePdfPath : null, // set only via /source upload
+    notes: body.notes ?? null,
+    createdAt: body.createdAt || (existing ? existing.createdAt : now),
+    updatedAt: now,
+  };
+  db.prepare(
+    `INSERT INTO warrants (id, dateISO, warrantNo, label, total, invoiceCount, categories, vendors, quality, reconciled, source, sourceFile, sourcePdfPath, notes, createdAt, updatedAt)
+     VALUES (@id, @dateISO, @warrantNo, @label, @total, @invoiceCount, @categories, @vendors, @quality, @reconciled, @source, @sourceFile, @sourcePdfPath, @notes, @createdAt, @updatedAt)
+     ON CONFLICT(id) DO UPDATE SET
+       dateISO=excluded.dateISO, warrantNo=excluded.warrantNo, label=excluded.label, total=excluded.total,
+       invoiceCount=excluded.invoiceCount, categories=excluded.categories, vendors=excluded.vendors,
+       quality=excluded.quality, reconciled=excluded.reconciled, source=excluded.source,
+       sourceFile=excluded.sourceFile, notes=excluded.notes, updatedAt=excluded.updatedAt`
+  ).run(row);
   res.json({ ok: true, id });
 });
 
+// Stores the original uploaded PDF for a warrant that's already been saved,
+// so it can be reopened later for reference. Separate from the PUT above so
+// a slow/large upload never blocks saving the ledger record itself.
+app.post("/api/warrants/:id/source", (req, res) => {
+  const id = req.params.id;
+  const existing = getWarrantRow(id);
+  if (!existing) return res.status(404).json({ error: "No warrant on file with that id — save it first." });
+  const { filename, data, mediaType } = req.body || {};
+  if (!data || typeof data !== "string") return res.status(400).json({ error: "Expected { filename, data, mediaType }" });
+  if (mediaType && mediaType !== "application/pdf") return res.status(400).json({ error: "Only application/pdf is accepted." });
+  let buf;
+  try {
+    buf = Buffer.from(data, "base64");
+  } catch (e) {
+    return res.status(400).json({ error: "data must be base64." });
+  }
+  if (buf.length > MAX_SOURCE_BYTES) return res.status(413).json({ error: "PDF is too large to store (30MB limit)." });
+
+  const dir = path.join(UPLOADS_DIR, id);
+  fs.mkdirSync(dir, { recursive: true });
+  // Wipe any previous source PDF for this warrant before writing the new one.
+  for (const f of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, f));
+  const safeName = (filename || "warrant.pdf").replace(/[^A-Za-z0-9 ._-]/g, "_").slice(0, 150) || "warrant.pdf";
+  const storedName = crypto.randomBytes(4).toString("hex") + "-" + safeName;
+  fs.writeFileSync(path.join(dir, storedName), buf);
+
+  db.prepare("UPDATE warrants SET sourcePdfPath = ?, sourceFile = ?, updatedAt = ? WHERE id = ?").run(
+    path.join(id, storedName),
+    filename || existing.sourceFile,
+    new Date().toISOString(),
+    id
+  );
+  res.json({ ok: true });
+});
+
+app.get("/api/warrants/:id/source", (req, res) => {
+  const row = getWarrantRow(req.params.id);
+  if (!row || !row.sourcePdfPath) return res.status(404).json({ error: "No source PDF on file for this warrant." });
+  const filePath = path.join(UPLOADS_DIR, row.sourcePdfPath);
+  if (!filePath.startsWith(UPLOADS_DIR) || !fs.existsSync(filePath)) return res.status(404).json({ error: "Source PDF is missing on disk." });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${(row.sourceFile || "warrant.pdf").replace(/"/g, "")}"`);
+  fs.createReadStream(filePath).pipe(res);
+});
+
 app.delete("/api/warrants/:id", (req, res) => {
-  const db = readDb();
-  delete db[req.params.id];
-  writeDb(db);
+  const row = getWarrantRow(req.params.id);
+  if (row && row.sourcePdfPath) {
+    const dir = path.join(UPLOADS_DIR, req.params.id);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  db.prepare("DELETE FROM warrants WHERE id = ?").run(req.params.id);
   res.json({ ok: true });
 });
 
 app.get("/api/export.csv", (req, res) => {
-  const db = readDb();
-  const warrants = Object.values(db);
+  const warrants = db.prepare("SELECT * FROM warrants").all().map(rowToWarrant);
   const categories = {};
   const vendors = {};
   warrants.forEach((w) => {

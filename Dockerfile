@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
@@ -7,7 +7,6 @@ RUN npm install --omit=dev
 
 COPY server.js ./
 COPY public ./public
-COPY seed ./seed
 
 ENV PORT=3000
 EXPOSE 3000
