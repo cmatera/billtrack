@@ -260,7 +260,13 @@ tbody tr:hover{background:var(--surface-2)}
       <h3 style="font-size:14px;margin-bottom:8px">Batch summary → category (uncheck to exclude a row)</h3>
       <div class="scroll-box" style="margin-bottom:16px">
         <table class="mini-table">
-          <thead><tr><th class="ex"></th><th>Batch</th><th>Department (as read)</th><th>Category</th><th style="text-align:right">Amount</th></tr></thead>
+          <thead><tr>
+            <th class="ex" title="Uncheck to leave this batch-summary row out of what gets saved."></th>
+            <th title="Which batch-summary group on the bill schedule this row belongs to.">Batch</th>
+            <th title="The department or line label exactly as printed on the bill schedule, before categorizing.">Department (as read)</th>
+            <th title="Sutton's 13-category taxonomy, auto-assigned from the department label. Change it here before saving if it's wrong.">Category</th>
+            <th style="text-align:right" title="Dollar amount for this batch-summary row.">Amount</th>
+          </tr></thead>
           <tbody id="rvSummaryRows"></tbody>
         </table>
       </div>
@@ -268,7 +274,12 @@ tbody tr:hover{background:var(--surface-2)}
       <h3 style="font-size:14px;margin-bottom:8px">Vendor line items found (uncheck to exclude)</h3>
       <div class="scroll-box">
         <table class="mini-table">
-          <thead><tr><th class="ex"></th><th>Vendor</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead>
+          <thead><tr>
+            <th class="ex" title="Uncheck to leave this line item out of what gets saved."></th>
+            <th title="Vendor name as extracted from the invoice, before alias normalization (e.g. folded into &quot;Amazon Capital Services&quot;).">Vendor</th>
+            <th title="Invoice description or line-item detail as printed on the bill schedule.">Description</th>
+            <th style="text-align:right" title="Dollar amount for this line item.">Amount</th>
+          </tr></thead>
           <tbody id="rvLineRows"></tbody>
         </table>
       </div>
