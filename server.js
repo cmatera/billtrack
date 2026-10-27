@@ -12,6 +12,7 @@
 
 const express = require("express");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
@@ -21,12 +22,16 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const DB_FILE = path.join(DATA_DIR, "warrants.db");
 const UPLOADS_DIR = path.join(DATA_DIR, "uploads");
+const BACKUPS_DIR = path.join(DATA_DIR, "backups");
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5";
 const MAX_SOURCE_BYTES = 30 * 1024 * 1024; // 30MB — generous for a scanned bill schedule
+const BACKUP_KEEP = 14; // rotate: keep the most recent N backups
+const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // one scheduled backup a day
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+fs.mkdirSync(BACKUPS_DIR, { recursive: true });
 
 const db = new Database(DB_FILE);
 db.pragma("journal_mode = WAL");
@@ -68,6 +73,19 @@ db.exec(`
   // scripts/backfill-pdf-text.js is run.
   if (!cols.includes("pdfText")) db.exec("ALTER TABLE warrants ADD COLUMN pdfText TEXT");
 }
+
+// One row per (fiscal year, category) — a budgeted amount to compare each
+// category's actual spend against on the "Spending trends" panel. A brand
+// new table, so CREATE TABLE IF NOT EXISTS alone is enough; no migration
+// needed on an existing database.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS budgets (
+    fy INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    amount REAL NOT NULL,
+    PRIMARY KEY (fy, category)
+  )
+`);
 
 // Escapes % _ and \ for a LIKE pattern using \ as the escape character.
 function likeEscape(s) {
@@ -310,6 +328,54 @@ app.get("/api/export.csv", (req, res) => {
   res.send(lines.join("\n"));
 });
 
+// One row per transaction (every included batch-summary row, across every
+// warrant) — for building a meeting packet or your own pivot tables, where
+// the totals-only export above isn't enough detail.
+app.get("/api/export-line-items.csv", (req, res) => {
+  const warrants = db.prepare("SELECT * FROM warrants ORDER BY dateISO").all().map(rowToWarrant);
+  const esc = (s) => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+  const lines = ["Date,Warrant #,Batch,Department,Category,Amount"];
+  warrants.forEach((w) => {
+    (w.summaryRows || []).forEach((r) => {
+      lines.push([esc(w.label || w.dateISO), esc(w.warrantNo), esc(r.batch), esc(r.department), esc(r.category), Number(r.amount || 0).toFixed(2)].join(","));
+    });
+  });
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", 'attachment; filename="sutton-bill-ledger-line-items.csv"');
+  res.send(lines.join("\n"));
+});
+
+// Budgeted amount per (fiscal year, category), compared against actual
+// spend on the "Spending trends" panel. All FYs come back in one shot
+// since the client caches budgets alongside the warrant list.
+app.get("/api/budgets", (req, res) => {
+  const rows = db.prepare("SELECT fy, category, amount FROM budgets").all();
+  const out = {};
+  rows.forEach((r) => {
+    (out[r.fy] = out[r.fy] || {})[r.category] = r.amount;
+  });
+  res.json(out);
+});
+
+// Replaces the full budget for one fiscal year with the given
+// {category: amount} map — whichever categories aren't in the body are
+// cleared for that FY, same "whole-object replace" shape as PUT /warrants.
+app.put("/api/budgets/:fy", (req, res) => {
+  const fy = Number(req.params.fy);
+  if (!Number.isInteger(fy)) return res.status(400).json({ error: "fy must be an integer" });
+  const body = req.body || {};
+  const entries = Object.entries(body)
+    .map(([cat, amt]) => [cat, Number(amt)])
+    .filter(([, amt]) => Number.isFinite(amt) && amt > 0);
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM budgets WHERE fy = ?").run(fy);
+    const insert = db.prepare("INSERT INTO budgets (fy, category, amount) VALUES (?, ?, ?)");
+    entries.forEach(([cat, amt]) => insert.run(fy, cat, amt));
+  });
+  tx();
+  res.json({ ok: true, fy, count: entries.length });
+});
+
 app.post("/api/extract", async (req, res) => {
   if (!ANTHROPIC_API_KEY) return res.status(503).json({ error: "ANTHROPIC_API_KEY is not configured on the server." });
   const { prompt, images } = req.body || {};
@@ -350,7 +416,100 @@ app.post("/api/extract", async (req, res) => {
   }
 });
 
+// --- Backups -----------------------------------------------------------
+// A single downloadable .tar.gz per backup: a consistent SQLite snapshot
+// (via better-sqlite3's online backup API, so it's safe to take even while
+// the server is handling requests under WAL) plus a copy of every stored
+// source PDF. Runs automatically on a schedule and on demand via the API.
+const BACKUP_NAME_RE = /^sutton-bill-ledger-backup-[0-9TZ-]+\.tar\.gz$/;
+
+async function createBackup() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "bsl-backup-"));
+  try {
+    await db.backup(path.join(workDir, "warrants.db"));
+    const tarArgs = ["-czf"];
+    const archiveName = `sutton-bill-ledger-backup-${stamp}.tar.gz`;
+    const archivePath = path.join(BACKUPS_DIR, archiveName);
+    tarArgs.push(archivePath, "-C", workDir, "warrants.db");
+    if (fs.existsSync(UPLOADS_DIR) && fs.readdirSync(UPLOADS_DIR).length) {
+      fs.cpSync(UPLOADS_DIR, path.join(workDir, "uploads"), { recursive: true });
+      tarArgs.push("-C", workDir, "uploads");
+    }
+    execFileSync("tar", tarArgs);
+    return { archiveName, archivePath };
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+function listBackups() {
+  return fs
+    .readdirSync(BACKUPS_DIR)
+    .filter((f) => BACKUP_NAME_RE.test(f))
+    .map((name) => {
+      const stat = fs.statSync(path.join(BACKUPS_DIR, name));
+      return { name, bytes: stat.size, createdAt: stat.mtime.toISOString() };
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function pruneOldBackups(keep) {
+  const backups = listBackups();
+  backups.slice(keep).forEach((b) => fs.unlinkSync(path.join(BACKUPS_DIR, b.name)));
+}
+
+app.get("/api/backups", (req, res) => {
+  res.json({ backups: listBackups() });
+});
+
+// Triggers a fresh backup right now (same thing the daily schedule does)
+// and returns its filename — the frontend then GETs the download route
+// below rather than this streaming the file inline.
+app.post("/api/backups", async (req, res) => {
+  try {
+    const { archiveName } = await createBackup();
+    pruneOldBackups(BACKUP_KEEP);
+    res.json({ ok: true, name: archiveName });
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+app.get("/api/backups/:name", (req, res) => {
+  const name = req.params.name;
+  if (!BACKUP_NAME_RE.test(name)) return res.status(400).json({ error: "bad filename" });
+  const filePath = path.join(BACKUPS_DIR, name);
+  if (!filePath.startsWith(BACKUPS_DIR) || !fs.existsSync(filePath)) return res.status(404).json({ error: "Backup not found." });
+  res.setHeader("Content-Type", "application/gzip");
+  res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
+  fs.createReadStream(filePath).pipe(res);
+});
+
+app.delete("/api/backups/:name", (req, res) => {
+  const name = req.params.name;
+  if (!BACKUP_NAME_RE.test(name)) return res.status(400).json({ error: "bad filename" });
+  const filePath = path.join(BACKUPS_DIR, name);
+  if (filePath.startsWith(BACKUPS_DIR) && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  res.json({ ok: true });
+});
+
+async function runScheduledBackup() {
+  try {
+    const { archiveName } = await createBackup();
+    pruneOldBackups(BACKUP_KEEP);
+    console.log(`Scheduled backup created: ${archiveName}`);
+  } catch (e) {
+    console.error("Scheduled backup failed:", (e && e.message) || e);
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Sutton Bill Ledger listening on :${PORT}`);
   if (!ANTHROPIC_API_KEY) console.log("ANTHROPIC_API_KEY not set — uploads are disabled until it is.");
+  // First backup shortly after startup (not instantly, so a crash-restart
+  // loop can't spin backups), then every BACKUP_INTERVAL_MS after that.
+  // restart: unless-stopped means this effectively runs daily in practice.
+  setTimeout(runScheduledBackup, 60 * 1000);
+  setInterval(runScheduledBackup, BACKUP_INTERVAL_MS);
 });

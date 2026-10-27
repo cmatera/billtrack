@@ -9,7 +9,9 @@ This is a self-hosted port of a [claude.ai Artifact](https://claude.ai) version 
 
 Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later. Click any row in "Spending by category" or "Spending by vendor" to drill into every row saved under it, across every warrant, each with a link straight to its source PDF. If a bill schedule flags an invoice as exceeding its purchase order, that's kept too and surfaced as a badge on the warrant and in the vendor drill-down. Each warrant also has an editable notes field, in the review step or later from its detail view — handy for flagging something to ask about before a meeting.
 
-A "Needs review" tile flags any warrant that doesn't reconcile, isn't full detail, or had its category rows guessed from vendor line items instead of a real batch-summary table — click it to see the whole list and why, instead of noticing by accident. "Spending trends" breaks category totals out by fiscal year (July–June) against the year before, so a spike or drop stands out instead of being buried in the all-time total. And "Search bill schedules" runs a full-text search over every stored PDF's actual text — a PO number, an exact dollar amount, anything printed on the page — not just what made it into a category or vendor row.
+A "Needs review" tile flags any warrant that doesn't reconcile, isn't full detail, or had its category rows guessed from vendor line items instead of a real batch-summary table — click it to see the whole list and why, instead of noticing by accident. "Spending trends" breaks category totals out by fiscal year (July–June) against the year before, so a spike or drop stands out instead of being buried in the all-time total — set a budget per category there too (an "Edit budgets" button on the same panel) and each category shows what percent of it you've spent. And "Search bill schedules" runs a full-text search over every stored PDF's actual text — a PO number, an exact dollar amount, anything printed on the page — not just what made it into a category or vendor row.
+
+The ledger also backs itself up: once a day, and on demand from the "Backups" section at the bottom of the page, it snapshots the database and every stored PDF into one downloadable `.tar.gz`, keeping the last 14. "Export CSV" in the top bar gives you category/vendor totals; "Export line items" gives you every transaction as its own row instead, for a meeting packet or your own pivot tables.
 
 Everything else — the category taxonomy, vendor normalization, the review-before-save flow, sortable/resizable columns — is the same frontend code.
 
@@ -29,6 +31,7 @@ public/index.html      The whole frontend (single file, no build step)
 scripts/               One-time maintenance scripts (see below)
 data/warrants.db       The live SQLite store (gitignored; created at runtime)
 data/uploads/<id>/     Original source PDFs, one folder per warrant (gitignored)
+data/backups/          Downloadable backup archives, pruned to the last 14 (gitignored)
 Dockerfile, docker-compose.yml
 ```
 
@@ -76,7 +79,14 @@ docker compose exec ledger node scripts/backfill-pdf-text.js
 - `GET /api/warrants/:id/source` — streams the stored PDF back (opens inline in the browser).
 - `DELETE /api/warrants/:id` — remove one warrant record and its stored source PDF.
 - `GET /api/export.csv` — category + vendor totals as a CSV download.
+- `GET /api/export-line-items.csv` — every included batch-summary row as its own CSV line (date, warrant #, batch, department, category, amount).
 - `GET /api/search?q=...` — full-text search over every stored PDF's extracted text (requires at least 3 characters); returns matching warrants with short snippets. The full text itself never leaves the server.
+- `GET /api/budgets` — every fiscal year's budgeted amount per category, as `{ "2026": { "Technology": 75000, ... }, ... }`.
+- `PUT /api/budgets/:fy` — replace one fiscal year's whole budget with the given `{category: amount}` map; a category left out is cleared for that FY.
+- `GET /api/backups` — list existing backup archives (name, size, created date).
+- `POST /api/backups` — trigger a fresh backup now (same thing the daily schedule does); returns its filename.
+- `GET /api/backups/:name` — download one backup archive.
+- `DELETE /api/backups/:name` — delete one backup archive.
 - `POST /api/extract` — `{ prompt, images: [{data, mediaType}] }` → calls the Anthropic API with the page images and returns the parsed JSON reply. Internal to the frontend; not meant to be called directly.
 
 ## Notes
@@ -84,3 +94,4 @@ docker compose exec ledger node scripts/backfill-pdf-text.js
 - This is built for one person's use (a single School Committee member tracking bill schedules), not multi-user access control — there's no login. Don't expose port 3000 to the open internet without putting it behind your own auth (a reverse proxy with basic auth, a VPN, Tailscale, etc.).
 - The categorization taxonomy and vendor alias list live in `public/index.html` (`categorize()` and `VENDOR_ALIASES`) — edit them directly if Sutton's batch naming changes.
 - `ANTHROPIC_MODEL` in `.env` lets you pin a specific model; see [Anthropic's model docs](https://docs.claude.com/en/docs/about-claude/models) for current ids.
+- Backups and full-text search depend on `poppler-utils` and `tar` being present in the image (both installed in the Dockerfile). A backup or PDF indexing attempt fails gracefully if either is missing — nothing else breaks — but you'll want to rebuild the image (`docker compose up -d --build`) if you're upgrading from a version of this app that predates them.

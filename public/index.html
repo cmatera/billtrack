@@ -139,13 +139,15 @@ tbody tr:hover{background:var(--surface-2)}
 .vendor-row[data-vendor]{cursor:pointer}
 .vendor-row[data-vendor]:hover{background:var(--surface-2)}
 
-.trend-row{display:grid;grid-template-columns:var(--cat-name-w,150px) 1fr 84px 84px 70px;gap:10px;align-items:center;padding:6px 0}
+.trend-row{display:grid;grid-template-columns:var(--cat-name-w,150px) 1fr 84px 84px 70px 150px;gap:10px;align-items:center;padding:6px 0}
 .trend-row .name{font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .trend-row .amt{font-family:var(--font-mono);font-size:12.5px;font-variant-numeric:tabular-nums;text-align:right;min-width:0}
 .trend-row .amt.dim{color:var(--ink-dim)}
 .trend-row .delta{font-family:var(--font-mono);font-size:11.5px;text-align:right;font-weight:600}
 .trend-row .delta.up{color:var(--bad)}
 .trend-row .delta.down{color:var(--good)}
+.trend-row .budget{text-align:right}
+.trend-row .budget-input{width:100px;font-family:var(--font-mono);font-size:12.5px;padding:4px 7px;border:1px solid var(--line);border-radius:6px;background:var(--surface-2);color:var(--ink);text-align:right}
 
 .search-result{border-top:1px solid var(--line);padding:10px 0}
 .search-result:first-child{border-top:none}
@@ -190,6 +192,7 @@ tbody tr:hover{background:var(--surface-2)}
     </div>
     <div style="display:flex;gap:8px;align-items:center">
       <button class="btn ghost small" id="exportBtn" title="Export category &amp; vendor totals as CSV">Export CSV</button>
+      <button class="btn ghost small" id="exportLineItemsBtn" title="Export every batch-summary row as its own CSV line — one per transaction, not just totals">Export line items</button>
       <button class="btn primary" id="uploadBtn">Upload bill schedule</button>
       <input type="file" id="fileInput" accept="application/pdf" multiple hidden>
     </div>
@@ -241,10 +244,21 @@ tbody tr:hover{background:var(--surface-2)}
       <h2>Spending trends</h2>
       <span class="hint" id="trendsHint"></span>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;margin:2px 0 10px">
+    <div style="display:flex;align-items:center;gap:8px;margin:2px 0 10px;flex-wrap:wrap">
       <label for="trendsFy" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-dim);font-weight:600">Fiscal year</label>
       <select id="trendsFy"></select>
       <span style="font-size:11.5px;color:var(--ink-dim)">compared to the fiscal year before it (July–June)</span>
+      <button class="btn ghost small" id="editBudgetsBtn" style="margin-left:auto" title="Set a budgeted amount per category for this fiscal year">Edit budgets</button>
+      <button class="btn primary small" id="saveBudgetsBtn" hidden>Save budgets</button>
+      <button class="btn small" id="cancelBudgetsBtn" hidden>Cancel</button>
+    </div>
+    <div class="trend-row" style="padding-bottom:6px;border-bottom:1px solid var(--line);margin-bottom:2px">
+      <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink-dim)">Category</div>
+      <div></div>
+      <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink-dim);text-align:right">This FY</div>
+      <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink-dim);text-align:right">Last FY</div>
+      <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink-dim);text-align:right">Change</div>
+      <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink-dim);text-align:right">Budget</div>
     </div>
     <div id="trendsBody"></div>
   </section>
@@ -268,6 +282,17 @@ tbody tr:hover{background:var(--surface-2)}
         <tbody id="warrantRows"></tbody>
       </table>
     </div>
+  </section>
+
+  <section class="panel" style="margin-top:20px">
+    <div class="panel-head">
+      <h2>Backups</h2>
+      <span class="hint">A fresh backup (database + every stored PDF) is created automatically once a day and the last 14 are kept</span>
+    </div>
+    <div style="margin-bottom:10px">
+      <button class="btn small" id="backupNowBtn">Back up now</button>
+    </div>
+    <div id="backupsBody"></div>
   </section>
 
 </main>
@@ -562,7 +587,7 @@ function computeNeedsReview(ws){
  * App state — backed by this server's /api/warrants, not a platform
  * capability. There's no live subscription: every save just refetches.
  * ---------------------------------------------------------------- */
-const state = { warrants: new Map(), ready: false, extractionEnabled: false };
+const state = { warrants: new Map(), ready: false, extractionEnabled: false, budgets: {} };
 let catSort = "amount";
 let vendorSort = "amount";
 let warrantSort = { key: "dateISO", dir: "desc" };
@@ -639,6 +664,7 @@ async function initApp(){
     banner.innerHTML = "No ANTHROPIC_API_KEY is set on the server, so new uploads are disabled — add it to .env and restart the container. The saved ledger below still works.";
     $("#uploadBtn").disabled = true;
   }
+  await loadBudgets();
   await loadWarrants();
 }
 
@@ -788,6 +814,8 @@ function categoryTotalsByFY(ws){
   return out;
 }
 let trendsFy = null; // null = not yet chosen; defaults to the most recent FY with data
+let editingBudgets = false;
+let budgetDraft = {}; // category -> string value, only while editingBudgets
 function renderTrends(){
   const ws = allWarrants();
   const byFy = categoryTotalsByFY(ws);
@@ -807,7 +835,11 @@ function renderTrends(){
 
   const cur = byFy[trendsFy] || {};
   const prior = byFy[trendsFy - 1] || {};
-  const names = CATEGORIES.filter(c => (cur[c] || 0) > 0 || (prior[c] || 0) > 0);
+  const budgets = (state.budgets && state.budgets[String(trendsFy)]) || {};
+  // While editing, show every category (even ones with no spending yet this
+  // FY) so a budget can be entered ahead of any actual — otherwise only
+  // categories with real spending, to keep the normal view focused.
+  const names = editingBudgets ? CATEGORIES.slice() : CATEGORIES.filter(c => (cur[c] || 0) > 0 || (prior[c] || 0) > 0);
   if (!names.length) {
     hint.textContent = "";
     body.innerHTML = '<div class="empty"><b>No category data for ' + fyLabel(trendsFy) + '</b></div>';
@@ -816,7 +848,7 @@ function renderTrends(){
   const curTotal = Object.values(cur).reduce((s, v) => s + v, 0);
   hint.textContent = fyLabel(trendsFy) + ": " + fmtMoney(curTotal) + (fys.includes(trendsFy - 1) ? " — vs " + fyLabel(trendsFy - 1) + " below" : " (no prior FY on file to compare)");
   const max = Math.max(1, ...names.map(n => cur[n] || 0));
-  const rows = names.sort((a, b) => (cur[b] || 0) - (cur[a] || 0));
+  const rows = editingBudgets ? names : names.sort((a, b) => (cur[b] || 0) - (cur[a] || 0));
   body.innerHTML = rows.map(name => {
     const c = cur[name] || 0, p = prior[name] || 0;
     let delta = "";
@@ -826,16 +858,78 @@ function renderTrends(){
     } else if (c > 0) {
       delta = '<span class="delta up" title="No spending in this category last FY">new</span>';
     }
+    const budget = budgets[name];
+    let budgetCell;
+    if (editingBudgets) {
+      const draftVal = budgetDraft[name] != null ? budgetDraft[name] : (budget != null ? budget : "");
+      budgetCell = '<input type="number" step="1" min="0" class="budget-input" data-budget-cat="' + escapeHtml(name) + '" value="' + escapeHtml(String(draftVal)) + '" placeholder="0">';
+    } else if (budget != null && budget > 0) {
+      const pct = (c / budget) * 100;
+      const cls = pct > 100 ? "bad" : pct > 90 ? "warn" : "good";
+      budgetCell = '<span class="badge ' + cls + '" title="' + fmtMoney(c) + ' of ' + fmtMoney(budget) + ' budgeted">' + pct.toFixed(0) + '% of ' + fmtMoney(budget) + '</span>';
+    } else {
+      budgetCell = '<span style="color:var(--ink-dim);font-size:11.5px">no budget set</span>';
+    }
     return '<div class="trend-row">' +
       '<div class="name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>' +
       '<div class="bar-track"><div class="bar-fill" style="width:' + Math.max(2, (c / max) * 100) + '%"></div></div>' +
       '<div class="amt">' + fmtMoney(c) + '</div>' +
       '<div class="amt dim" title="' + fyLabel(trendsFy - 1) + '">' + (p > 0 ? fmtMoney(p) : "—") + '</div>' +
       '<div class="delta">' + delta + '</div>' +
+      '<div class="budget">' + budgetCell + '</div>' +
     '</div>';
   }).join("");
 }
 $("#trendsFy").addEventListener("change", (e) => { trendsFy = Number(e.target.value); renderTrends(); });
+
+/* ---------------------------------------------------------------- *
+ * Budgets — one amount per (fiscal year, category), cached client-side
+ * alongside the warrant list so "Spending trends" can compare against it
+ * without a round-trip on every render.
+ * ---------------------------------------------------------------- */
+async function loadBudgets(){
+  try {
+    const res = await fetch("/api/budgets");
+    state.budgets = await res.json();
+  } catch (e) {
+    state.budgets = {};
+  }
+}
+function setBudgetEditMode(on){
+  editingBudgets = on;
+  budgetDraft = {};
+  $("#editBudgetsBtn").hidden = on;
+  $("#saveBudgetsBtn").hidden = !on;
+  $("#cancelBudgetsBtn").hidden = !on;
+  renderTrends();
+}
+$("#editBudgetsBtn").addEventListener("click", () => setBudgetEditMode(true));
+$("#cancelBudgetsBtn").addEventListener("click", () => setBudgetEditMode(false));
+$("#trendsBody").addEventListener("input", (e) => {
+  const input = e.target.closest("[data-budget-cat]");
+  if (input) budgetDraft[input.dataset.budgetCat] = input.value;
+});
+$("#saveBudgetsBtn").addEventListener("click", async () => {
+  const fy = trendsFy;
+  const body = {};
+  CATEGORIES.forEach(c => {
+    const raw = budgetDraft[c];
+    if (raw != null && String(raw).trim() !== "") body[c] = Number(raw);
+  });
+  try {
+    const res = await fetch("/api/budgets/" + encodeURIComponent(fy), {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "save failed");
+    await loadBudgets();
+    setBudgetEditMode(false);
+    toast("Budgets saved for " + fyLabel(fy) + ".", "good");
+  } catch (e) {
+    toast("Couldn't save budgets — " + (e && e.message ? e.message : "try again."), "bad");
+  }
+});
 
 function renderWarrantTable(){
   let ws = Array.from(state.warrants.entries());
@@ -1112,6 +1206,9 @@ $$(".th-sort").forEach(btn => btn.addEventListener("click", () => {
  * ---------------------------------------------------------------- */
 $("#exportBtn").addEventListener("click", () => {
   window.location.href = "/api/export.csv";
+});
+$("#exportLineItemsBtn").addEventListener("click", () => {
+  window.location.href = "/api/export-line-items.csv";
 });
 
 /* ---------------------------------------------------------------- *
@@ -1493,10 +1590,85 @@ async function uploadSourcePdf(id, file){
 }
 
 /* ---------------------------------------------------------------- *
+ * Backups — a downloadable snapshot (database + every stored PDF) that's
+ * also taken automatically once a day on the server; this panel just lists
+ * what's on file and lets you grab one or trigger a fresh one.
+ * ---------------------------------------------------------------- */
+function fmtBytes(n){
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+function fmtBackupDate(iso){
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+async function renderBackups(){
+  const body = $("#backupsBody");
+  let data;
+  try {
+    const res = await fetch("/api/backups");
+    data = await res.json();
+  } catch (e) {
+    body.innerHTML = '<div class="empty"><b>Couldn’t load backups</b>Try reloading the page.</div>';
+    return;
+  }
+  const backups = data.backups || [];
+  if (!backups.length) {
+    body.innerHTML = '<div class="empty"><b>No backups yet</b>One is taken automatically about a minute after the server starts, then daily after that — or click "Back up now" above.</div>';
+    return;
+  }
+  body.innerHTML = '<table class="mini-table"><thead><tr>' +
+    '<th>Created</th><th style="text-align:right">Size</th><th></th>' +
+    '</tr></thead><tbody>' +
+    backups.map(b => (
+      '<tr>' +
+        '<td class="mono">' + escapeHtml(fmtBackupDate(b.createdAt)) + '</td>' +
+        '<td style="text-align:right" class="mono">' + fmtBytes(b.bytes) + '</td>' +
+        '<td style="text-align:right">' +
+          '<a class="btn small" style="text-decoration:none;margin-right:6px" href="/api/backups/' + encodeURIComponent(b.name) + '" title="Download this backup">Download</a>' +
+          '<button class="btn small" data-delete-backup="' + escapeHtml(b.name) + '" title="Delete this backup">Delete</button>' +
+        '</td>' +
+      '</tr>'
+    )).join("") +
+    '</tbody></table>';
+}
+$("#backupNowBtn").addEventListener("click", async () => {
+  const btn = $("#backupNowBtn");
+  btn.disabled = true;
+  btn.textContent = "Backing up…";
+  try {
+    const res = await fetch("/api/backups", { method: "POST" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "backup failed");
+    toast("Backup created.", "good");
+    await renderBackups();
+  } catch (e) {
+    toast("Backup failed — " + (e && e.message ? e.message : "try again."), "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Back up now";
+  }
+});
+$("#backupsBody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-delete-backup]");
+  if (!btn) return;
+  const name = btn.dataset.deleteBackup;
+  try {
+    const res = await fetch("/api/backups/" + encodeURIComponent(name), { method: "DELETE" });
+    if (!res.ok) throw new Error("delete failed");
+    await renderBackups();
+  } catch (e2) {
+    toast("Couldn't delete that backup.", "bad");
+  }
+});
+
+/* ---------------------------------------------------------------- *
  * Boot
  * ---------------------------------------------------------------- */
 initResizers();
 initApp();
+renderBackups();
 
 })();
 </script>
