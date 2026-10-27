@@ -88,6 +88,11 @@ main{max-width:1180px;margin:0 auto;padding-block:22px 60px}
 .col-resizer{position:absolute;top:-6px;bottom:-6px;right:-10px;width:14px;cursor:col-resize;touch-action:none;z-index:2}
 .col-resizer::before{content:"";position:absolute;top:2px;bottom:2px;left:6px;width:2px;background:var(--line);border-radius:1px}
 .col-resizer:hover::before,.col-resizer.active::before{background:var(--accent)}
+.th-sort[title],.col-sort[title]{border-bottom:1px dotted var(--ink-dim)}
+.th-sort[title]:hover,.col-sort[title]:hover{border-bottom-color:var(--ink)}
+.hd{border-bottom:1px dotted var(--ink-dim);cursor:help}
+th.ex[title]{cursor:help}
+.mini-table th[title]{cursor:help}
 #categoryPanel .col-head.bar,#categoryPanel .bar-row{grid-template-columns:var(--cat-name-w,150px) 1fr auto 46px}
 #vendorPanel .col-head.vendor,#vendorPanel .vendor-row{grid-template-columns:var(--vendor-name-w,220px) auto 46px}
 .empty{padding:22px 4px;text-align:center;color:var(--ink-dim);font-size:13px}
@@ -212,7 +217,7 @@ tbody tr:hover{background:var(--surface-2)}
           <th><button class="th-sort" data-key="dateISO" data-label="Date" title="Warrant / school committee meeting date.">Date</button><span class="col-resizer" data-col="0"></span></th>
           <th><button class="th-sort" data-key="warrantNo" data-label="#" title="Warrant number, in the committee's continuous numbering.">#</button><span class="col-resizer" data-col="1"></span></th>
           <th style="text-align:right"><button class="th-sort" data-key="total" data-label="Total" title="Total dollar amount stated on the warrant's cover page.">Total</button><span class="col-resizer" data-col="2"></span></th>
-          <th style="text-align:right" title="This warrant's total as a share of all warrants on file.">% of total<span class="col-resizer" data-col="3"></span></th>
+          <th style="text-align:right" title="This warrant's total as a share of all warrants on file."><span class="hd">% of total</span><span class="col-resizer" data-col="3"></span></th>
           <th style="text-align:right"><button class="th-sort" data-key="invoiceCount" data-label="Invoices" title="Number of individual invoices on this warrant.">Invoices</button><span class="col-resizer" data-col="4"></span></th>
           <th><button class="th-sort" data-key="reconciled" data-label="Reconciled" title="Whether the batch-summary rows add up to the stated cover total, within 2¢.">Reconciled</button><span class="col-resizer" data-col="5"></span></th>
           <th><button class="th-sort" data-key="quality" data-label="Quality" title="How this warrant's data was collected: full detail (uploaded here) vs. legacy (seeded from the committee's prior review).">Quality</button><span class="col-resizer" data-col="6"></span></th>
@@ -262,10 +267,10 @@ tbody tr:hover{background:var(--surface-2)}
         <table class="mini-table">
           <thead><tr>
             <th class="ex" title="Uncheck to leave this batch-summary row out of what gets saved."></th>
-            <th title="Which batch-summary group on the bill schedule this row belongs to.">Batch</th>
-            <th title="The department or line label exactly as printed on the bill schedule, before categorizing.">Department (as read)</th>
-            <th title="Sutton's 13-category taxonomy, auto-assigned from the department label. Change it here before saving if it's wrong.">Category</th>
-            <th style="text-align:right" title="Dollar amount for this batch-summary row.">Amount</th>
+            <th title="Which batch-summary group on the bill schedule this row belongs to."><span class="hd">Batch</span></th>
+            <th title="The department or line label exactly as printed on the bill schedule, before categorizing."><span class="hd">Department (as read)</span></th>
+            <th title="Sutton's 13-category taxonomy, auto-assigned from the department label. Change it here before saving if it's wrong."><span class="hd">Category</span></th>
+            <th style="text-align:right" title="Dollar amount for this batch-summary row."><span class="hd">Amount</span></th>
           </tr></thead>
           <tbody id="rvSummaryRows"></tbody>
         </table>
@@ -276,9 +281,9 @@ tbody tr:hover{background:var(--surface-2)}
         <table class="mini-table">
           <thead><tr>
             <th class="ex" title="Uncheck to leave this line item out of what gets saved."></th>
-            <th title="Vendor name as extracted from the invoice, before alias normalization (e.g. folded into &quot;Amazon Capital Services&quot;).">Vendor</th>
-            <th title="Invoice description or line-item detail as printed on the bill schedule.">Description</th>
-            <th style="text-align:right" title="Dollar amount for this line item.">Amount</th>
+            <th title="Vendor name as extracted from the invoice, before alias normalization (e.g. folded into &quot;Amazon Capital Services&quot;)."><span class="hd">Vendor</span></th>
+            <th title="Invoice description or line-item detail as printed on the bill schedule."><span class="hd">Description</span></th>
+            <th style="text-align:right" title="Dollar amount for this line item."><span class="hd">Amount</span></th>
           </tr></thead>
           <tbody id="rvLineRows"></tbody>
         </table>
