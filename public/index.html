@@ -423,12 +423,14 @@ tbody tr:hover{background:var(--surface-2)}
       <button class="x" id="vendorDetailClose" aria-label="Close">×</button>
     </div>
     <div class="modal-body">
+      <div class="desc" id="vdCategoryNote" style="margin-bottom:10px"></div>
       <div class="scroll-box">
         <table class="mini-table">
           <thead><tr>
             <th title="Warrant date this line item came from.">Date</th>
             <th title="Warrant number.">#</th>
             <th title="Invoice description or line-item detail as printed on the bill schedule.">Description</th>
+            <th title="The category this line item's batch-summary row was assigned, when linked. Click it to see that category's own drill-down.">Category</th>
             <th style="text-align:right" title="Dollar amount for this line item.">Amount</th>
             <th style="text-align:right" title="Purchase-order overage flagged on the bill schedule, if any.">Exceeds PO</th>
             <th style="text-align:right" title="Unusually large relative to this vendor's own history on file.">Unusual?</th>
@@ -1185,6 +1187,19 @@ function vendorsInCategory(name){
   return { totals, linkedTotal };
 }
 
+// The reverse of vendorsInCategory()'s join: given one line item and the
+// warrant it came from, finds the category of the batch-summary row that
+// shares its "batch" label (same normalization, "—" excluded for the same
+// reason). Returns null when there's nothing to join against yet — an
+// older line item with no batch, or one whose batch doesn't match any
+// summary row in that warrant.
+function categoryForLineItem(w, li){
+  const b = String((li && li.batch) || "").trim().toLowerCase();
+  if (!b || b === "—") return null;
+  const match = (w.summaryRows || []).find(r => String(r.batch || "").trim().toLowerCase() === b);
+  return match ? match.category : null;
+}
+
 // Category rows (in "Spending by category") are the only place individual
 // row-level detail is kept — categories are assigned per batch-summary row,
 // not per vendor line item, so this is the real granularity of "a category
@@ -1263,26 +1278,41 @@ function openVendorDetail(name){
     ? fmtMoney(total) + " across " + rows.length + " line item" + (rows.length === 1 ? "" : "s")
     : "No line-item detail saved for this vendor";
 
+  const linkedCount = rows.filter(({ w, r }) => categoryForLineItem(w, r)).length;
+  $("#vdCategoryNote").textContent = rows.length && linkedCount < rows.length
+    ? "Category known for " + linkedCount + " of " + rows.length + " line item" + (rows.length === 1 ? "" : "s") + " — the rest predate the batch link (Setup → Category & vendor row detail, with “Force redo” checked, adds it)."
+    : "";
+
   const medianInfo = vendorMedianCache[name];
-  $("#vdDetailBody").innerHTML = rows.length ? rows.map(({ w, r }) => (
-    '<tr>' +
+  $("#vdDetailBody").innerHTML = rows.length ? rows.map(({ w, r }) => {
+    const category = categoryForLineItem(w, r);
+    return '<tr>' +
       '<td class="mono">' + escapeHtml(w.label || isoToLabel(w.dateISO)) + '</td>' +
       '<td class="mono">' + escapeHtml(w.warrantNo || "—") + '</td>' +
       '<td>' + escapeHtml(r.description || "—") + '</td>' +
+      '<td>' + (category
+        ? '<span data-cat-link="' + escapeHtml(category) + '" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="Click to see this category’s own drill-down.">' + escapeHtml(category) + '</span>'
+        : '<span style="color:var(--ink-dim)" title="Not linked to a category yet — this line item predates the batch link, or its batch didn’t match a summary row.">—</span>') + '</td>' +
       '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td>' +
       '<td style="text-align:right" class="mono">' + (Number(r.exceedsPoBy) > 0 ? '<span class="badge warn">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td>' +
       '<td style="text-align:right">' + (isAnomalousAmount(r.amount, medianInfo) ? '<span class="badge warn" title="' + ANOMALY_MULTIPLE + 'x or more this vendor\'s typical amount">large</span>' : '—') + '</td>' +
       '<td>' + (w.hasSourcePdf
         ? '<a class="btn small" style="text-decoration:none" href="/api/warrants/' + encodeURIComponent(w.id) + '/source" target="_blank" rel="noopener" title="Opens the original bill schedule PDF this line item came from.">View PDF</a>'
         : '') + '</td>' +
-    '</tr>'
-  )).join("") : '<tr><td colspan="7" style="text-align:center;color:var(--ink-dim);padding:16px 0">This vendor’s total comes from warrants saved before per-line-item detail was kept — only the aggregate total is available for those.</td></tr>';
+    '</tr>';
+  }).join("") : '<tr><td colspan="8" style="text-align:center;color:var(--ink-dim);padding:16px 0">This vendor’s total comes from warrants saved before per-line-item detail was kept — only the aggregate total is available for those.</td></tr>';
 
   $("#vendorDetailModal").hidden = false;
 }
 $("#vendorBody").addEventListener("click", (e) => {
   const row = e.target.closest(".vendor-row[data-vendor]");
   if (row) openVendorDetail(row.dataset.vendor);
+});
+$("#vdDetailBody").addEventListener("click", (e) => {
+  const el = e.target.closest("[data-cat-link]");
+  if (!el) return;
+  $("#vendorDetailModal").hidden = true;
+  openCategoryDetail(el.dataset.catLink);
 });
 $("#vendorDetailClose").addEventListener("click", () => { $("#vendorDetailModal").hidden = true; });
 $("#vendorDetailModal").addEventListener("click", (e) => { if (e.target.id === "vendorDetailModal") $("#vendorDetailModal").hidden = true; });
