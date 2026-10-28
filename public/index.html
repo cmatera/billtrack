@@ -660,6 +660,22 @@ function isAnomalousAmount(amount, medianInfo){
   return amt >= medianInfo.median * ANOMALY_MULTIPLE && (amt - medianInfo.median) >= ANOMALY_MIN_DELTA;
 }
 
+// The extraction prompt used to let the model confuse two adjacent PDF
+// columns, "EXCEEDS PO BY" and "PO BALANCE" — storing the (usually much
+// larger) running PO-balance figure as if it were a genuine overage. The
+// prompt itself is fixed now, but older saved data can still have this
+// mixup baked in. A real "exceeds PO by" amount is normally a modest
+// overage relative to the invoice itself; a misread PO balance tends to
+// dwarf it. This heuristic can't know for certain — it just flags values
+// implausible enough to be worth a quick look at the source PDF.
+const PO_OVERAGE_IMPLAUSIBLE_MULTIPLE = 3;
+function isImplausiblePoOverage(amount, exceedsPoBy){
+  const amt = Number(amount) || 0;
+  const over = Number(exceedsPoBy) || 0;
+  if (!amt || !over) return false;
+  return over >= amt * PO_OVERAGE_IMPLAUSIBLE_MULTIPLE;
+}
+
 function reviewFlags(w){
   const flags = [];
   if (w.reconciled === false) flags.push({ key: "mismatch", label: "Reconciliation mismatch" });
@@ -668,6 +684,8 @@ function reviewFlags(w){
   if (rows.length && rows.every(r => r.batch === "—")) flags.push({ key: "synthesized", label: "Category rows guessed from line items" });
   const anomalies = (w.lineItems || []).filter(li => isAnomalousAmount(li.amount, vendorMedianCache[li.vendor]));
   if (anomalies.length) flags.push({ key: "anomaly", label: anomalies.length + " invoice" + (anomalies.length === 1 ? "" : "s") + " unusually large for vendor" });
+  const implausiblePo = (w.lineItems || []).filter(li => isImplausiblePoOverage(li.amount, li.exceedsPoBy));
+  if (implausiblePo.length) flags.push({ key: "po-mixup", label: implausiblePo.length + " invoice" + (implausiblePo.length === 1 ? "" : "s") + " with an implausible “exceeds PO” amount — check the source PDF" });
   return flags;
 }
 function computeNeedsReview(ws){
@@ -1106,11 +1124,17 @@ function openDetail(id){
   } else if (w.sourceFile) {
     html += '<div style="margin-bottom:14px;font-size:11.5px;color:var(--ink-dim)" title="The filename was recorded, but the PDF itself wasn\'t saved — likely uploaded before source-PDF storage was added.">Source: ' + escapeHtml(w.sourceFile) + ' (original file not stored)</div>';
   }
-  const poFlagged = (w.lineItems || []).filter(li => Number(li.exceedsPoBy) > 0);
+  const poFlaggedAll = (w.lineItems || []).filter(li => Number(li.exceedsPoBy) > 0);
+  const poImplausible = poFlaggedAll.filter(li => isImplausiblePoOverage(li.amount, li.exceedsPoBy));
+  const poFlagged = poFlaggedAll.filter(li => !poImplausible.includes(li));
   if (poFlagged.length) {
     const poTotal = poFlagged.reduce((s, li) => s + Number(li.exceedsPoBy), 0);
     html += '<div style="margin-bottom:14px"><span class="badge warn" title="Invoices on this warrant flagged as exceeding their purchase order.">' +
       poFlagged.length + ' invoice' + (poFlagged.length === 1 ? "" : "s") + ' exceeded PO by ' + fmtMoney(poTotal) + '</span></div>';
+  }
+  if (poImplausible.length) {
+    html += '<div style="margin-bottom:14px"><span class="badge bad" title="The saved “exceeds PO by” amount is many times the invoice itself — a likely sign the extraction misread the PDF\'s PO BALANCE column instead. Open the source PDF to check before trusting this figure.">' +
+      poImplausible.length + ' invoice' + (poImplausible.length === 1 ? "" : "s") + ' with an implausible exceeds-PO amount — check the PDF</span></div>';
   }
   const anomalyFlagged = (w.lineItems || []).filter(li => isAnomalousAmount(li.amount, vendorMedianCache[li.vendor]));
   if (anomalyFlagged.length) {
@@ -1294,7 +1318,11 @@ function openVendorDetail(name){
         ? '<span data-cat-link="' + escapeHtml(category) + '" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="Click to see this category’s own drill-down.">' + escapeHtml(category) + '</span>'
         : '<span style="color:var(--ink-dim)" title="Not linked to a category yet — this line item predates the batch link, or its batch didn’t match a summary row.">—</span>') + '</td>' +
       '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td>' +
-      '<td style="text-align:right" class="mono">' + (Number(r.exceedsPoBy) > 0 ? '<span class="badge warn">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td>' +
+      '<td style="text-align:right" class="mono">' + (Number(r.exceedsPoBy) > 0
+        ? (isImplausiblePoOverage(r.amount, r.exceedsPoBy)
+          ? '<span class="badge bad" title="Many times the invoice amount — likely a misread of the PDF\'s PO BALANCE column rather than a real overage. Check the source PDF.">' + fmtMoney(r.exceedsPoBy) + ' ⚠</span>'
+          : '<span class="badge warn">' + fmtMoney(r.exceedsPoBy) + '</span>')
+        : '—') + '</td>' +
       '<td style="text-align:right">' + (isAnomalousAmount(r.amount, medianInfo) ? '<span class="badge warn" title="' + ANOMALY_MULTIPLE + 'x or more this vendor\'s typical amount">large</span>' : '—') + '</td>' +
       '<td>' + (w.hasSourcePdf
         ? '<a class="btn small" style="text-decoration:none" href="/api/warrants/' + encodeURIComponent(w.id) + '/source" target="_blank" rel="noopener" title="Opens the original bill schedule PDF this line item came from.">View PDF</a>'
@@ -1515,7 +1543,7 @@ function extractionPrompt(startPage, endPage, totalPages){
     "You are reading pages " + startPage + "-" + endPage + " of a " + totalPages + "-page Massachusetts school district bill schedule (a Munis \"Invoice Entry Proof List\" warrant). Page conventions for the WHOLE document, which may extend beyond these images:",
     "- The first page of the whole document is a cover letter stating the warrant date and a grand total.",
     "- The second page of the whole document is a batch-summary table with columns BATCH | DEPARTMENT | AMOUNT | INVOICES.",
-    "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description, sometimes an \"EXCEEDS PO BY\" column).",
+    "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description). Near the right edge of these invoice-detail pages there are often two separate numeric columns that are easy to confuse: \"EXCEEDS PO BY\" and \"PO BALANCE\". They are NOT the same thing: \"EXCEEDS PO BY\" is usually blank or \".00\" (most invoices do not exceed their purchase order), while \"PO BALANCE\" is a different, often much larger, running-balance figure that has nothing to do with exceeding the PO. Only read the \"EXCEEDS PO BY\" column for the exceedsPoBy field below — never substitute the \"PO BALANCE\" column's value for it, even though the two columns sit next to each other and look similar.",
     "",
     "From ONLY the pages shown in THESE images, extract this JSON object and reply with ONLY the JSON, no other text:",
     "{",
@@ -1525,7 +1553,7 @@ function extractionPrompt(startPage, endPage, totalPages){
     '  "summaryRows": [{"batch":"string","department":"string","amount":number,"invoices":number}],',
     '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number}]',
     "}",
-    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. Use null for anything not visible in these pages — other pages elsewhere in the document may supply it."
+    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. Use null for anything not visible in these pages — other pages elsewhere in the document may supply it."
   ].join("\n");
 }
 
@@ -1701,7 +1729,11 @@ function renderReviewRows(){
     return '<tr><td class="ex"><input type="checkbox" ' + (r.include ? "checked" : "") + ' data-lrow="' + i + '"></td>' +
     '<td>' + escapeHtml(r.vendor) + '</td><td>' + escapeHtml(r.description) + '</td>' +
     '<td style="text-align:right" class="mono">' + fmtMoney(r.amount) + '</td>' +
-    '<td style="text-align:right" class="mono">' + (r.exceedsPoBy > 0 ? '<span class="badge warn" title="Flagged as exceeding its purchase order">' + fmtMoney(r.exceedsPoBy) + '</span>' : '—') + '</td>' +
+    '<td style="text-align:right" class="mono">' + (r.exceedsPoBy > 0
+      ? (isImplausiblePoOverage(r.amount, r.exceedsPoBy)
+        ? '<span class="badge bad" title="Many times the invoice amount — likely a misread of the PDF\'s PO BALANCE column rather than a real overage. Double-check against the source PDF before saving.">' + fmtMoney(r.exceedsPoBy) + ' ⚠</span>'
+        : '<span class="badge warn" title="Flagged as exceeding its purchase order">' + fmtMoney(r.exceedsPoBy) + '</span>')
+      : '—') + '</td>' +
     '<td style="text-align:right">' + (anomalous ? '<span class="badge warn" title="Unusually large relative to this vendor\'s history on file">large</span>' : '—') + '</td></tr>';
   }).join("") : '<tr><td colspan="6" style="text-align:center;color:var(--ink-dim)">No vendor line items were found on the scanned pages.</td></tr>';
 

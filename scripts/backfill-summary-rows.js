@@ -116,13 +116,27 @@ function normalizeVendorWithAliases(aliases, raw) {
   return s;
 }
 
+// Same heuristic as public/index.html's isImplausiblePoOverage() — flags a
+// saved "exceeds PO by" value that's many times the invoice itself, a likely
+// sign the extraction grabbed the PDF's PO BALANCE column instead (the two
+// sit next to each other and are easy to confuse; the extraction prompt
+// below now calls this out explicitly, but older saved data can still have
+// the mixup baked in).
+const PO_OVERAGE_IMPLAUSIBLE_MULTIPLE = 3;
+function isImplausiblePoOverage(amount, exceedsPoBy) {
+  const amt = Number(amount) || 0;
+  const over = Number(exceedsPoBy) || 0;
+  if (!amt || !over) return false;
+  return over >= amt * PO_OVERAGE_IMPLAUSIBLE_MULTIPLE;
+}
+
 // Same prompt the browser sends per page-batch (public/index.html, extractionPrompt()).
 function extractionPrompt(startPage, endPage, totalPages) {
   return [
     "You are reading pages " + startPage + "-" + endPage + " of a " + totalPages + "-page Massachusetts school district bill schedule (a Munis \"Invoice Entry Proof List\" warrant). Page conventions for the WHOLE document, which may extend beyond these images:",
     "- The first page of the whole document is a cover letter stating the warrant date and a grand total.",
     "- The second page of the whole document is a batch-summary table with columns BATCH | DEPARTMENT | AMOUNT | INVOICES.",
-    "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description, sometimes an \"EXCEEDS PO BY\" column).",
+    "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description). Near the right edge of these invoice-detail pages there are often two separate numeric columns that are easy to confuse: \"EXCEEDS PO BY\" and \"PO BALANCE\". They are NOT the same thing: \"EXCEEDS PO BY\" is usually blank or \".00\" (most invoices do not exceed their purchase order), while \"PO BALANCE\" is a different, often much larger, running-balance figure that has nothing to do with exceeding the PO. Only read the \"EXCEEDS PO BY\" column for the exceedsPoBy field below — never substitute the \"PO BALANCE\" column's value for it, even though the two columns sit next to each other and look similar.",
     "",
     "From ONLY the pages shown in THESE images, extract this JSON object and reply with ONLY the JSON, no other text:",
     "{",
@@ -132,7 +146,7 @@ function extractionPrompt(startPage, endPage, totalPages) {
     '  "summaryRows": [{"batch":"string","department":"string","amount":number,"invoices":number}],',
     '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number}]',
     "}",
-    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. Use null for anything not visible in these pages — other pages elsewhere in the document may supply it.",
+    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. Use null for anything not visible in these pages — other pages elsewhere in the document may supply it.",
   ].join("\n");
 }
 
@@ -319,7 +333,8 @@ async function main() {
       const merged = await extractWarrantFromPages(raster.files, label);
       const summaryRows = toSummaryRows(merged, taxonomyRules);
       const lineItems = toLineItems(merged, vendorAliases);
-      const poFlagged = lineItems.filter((li) => li.exceedsPoBy > 0).length;
+      const poImplausible = lineItems.filter((li) => isImplausiblePoOverage(li.amount, li.exceedsPoBy)).length;
+      const poFlagged = lineItems.filter((li) => li.exceedsPoBy > 0).length - poImplausible;
 
       if (!summaryRows.length && !lineItems.length) {
         console.log(`✗ ${label}: extraction found no batch-summary rows or line items — leaving as-is.`);
@@ -331,7 +346,8 @@ async function main() {
       const oldTotal = row.total == null ? null : round2(row.total);
       const mismatchNote = oldTotal != null && newTotal > 0 && Math.abs(newTotal - oldTotal) > 0.02 ? `  (⚠ sums to ${newTotal.toFixed(2)}, stored total is ${oldTotal.toFixed(2)} — categories/total left untouched either way)` : "";
       const poNote = poFlagged ? `  (${poFlagged} invoice${poFlagged === 1 ? "" : "s"} exceeded PO)` : "";
-      console.log(`✓ ${label}: ${summaryRows.length} summary row(s), ${lineItems.length} line item(s) recovered.${poNote}${mismatchNote}`);
+      const poWarnNote = poImplausible ? `  (⚠ ${poImplausible} invoice${poImplausible === 1 ? "" : "s"} with an implausible exceeds-PO amount — check the source PDF)` : "";
+      console.log(`✓ ${label}: ${summaryRows.length} summary row(s), ${lineItems.length} line item(s) recovered.${poNote}${poWarnNote}${mismatchNote}`);
 
       if (!DRY_RUN) {
         db.prepare("UPDATE warrants SET summaryRows = ?, lineItems = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(summaryRows), JSON.stringify(lineItems), new Date().toISOString(), row.id);
