@@ -106,9 +106,16 @@ function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
+// Same leaked-remit-code problem as public/index.html's normalizeVendorWithAliases()
+// — see its comment for the confirmed real-data example. Kept as a plain copy here
+// since this script runs standalone (no server, no browser).
+function stripVendorCodePrefix(s) {
+  return s.replace(/^(?:\d{1,6}\s+)?\d{5}\s+(?=\S)/, "");
+}
 function normalizeVendorWithAliases(aliases, raw) {
   let s = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s) return "Unknown vendor";
+  s = stripVendorCodePrefix(s);
   const lower = s.toLowerCase();
   for (const a of aliases) {
     if ((a.triggers || []).some((t) => t && lower.includes(String(t).toLowerCase()))) return a.canonical;
@@ -137,6 +144,7 @@ function extractionPrompt(startPage, endPage, totalPages) {
     "- The first page of the whole document is a cover letter stating the warrant date and a grand total.",
     "- The second page of the whole document is a batch-summary table with columns BATCH | DEPARTMENT | AMOUNT | INVOICES.",
     "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description). Near the right edge of these invoice-detail pages there are often two separate numeric columns that are easy to confuse: \"EXCEEDS PO BY\" and \"PO BALANCE\". They are NOT the same thing: \"EXCEEDS PO BY\" is usually blank or \".00\" (most invoices do not exceed their purchase order), while \"PO BALANCE\" is a different, often much larger, running-balance figure that has nothing to do with exceeding the PO. Only read the \"EXCEEDS PO BY\" column for the exceedsPoBy field below — never substitute the \"PO BALANCE\" column's value for it, even though the two columns sit next to each other and look similar.",
+    "- Each invoice-detail line also has a \"VOUCHER\" column (a 5-digit number, distinct from both \"PO\" and \"DOCUMENT INVOICE\") — this is Munis's own unique ID for that line, and it's what's used below to tell two genuinely different invoices apart from the same invoice printed twice. Read it exactly as printed; never leave it blank if a number is visible in that column.",
     "",
     "From ONLY the pages shown in THESE images, extract this JSON object and reply with ONLY the JSON, no other text:",
     "{",
@@ -144,9 +152,9 @@ function extractionPrompt(startPage, endPage, totalPages) {
     '  "coverTotal": number or null,',
     '  "warrantNo": "string like \\"24\\", or null",',
     '  "summaryRows": [{"batch":"string","department":"string","amount":number,"invoices":number}],',
-    '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number}]',
+    '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number,"voucher":"string or null"}]',
     "}",
-    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. Use null for anything not visible in these pages — other pages elsewhere in the document may supply it.",
+    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. voucher must be the \"VOUCHER\" column's value specifically, as a string (e.g. \"95891\"); use null only if that column is genuinely blank for that line. Use null for anything else not visible in these pages — other pages elsewhere in the document may supply it.",
   ].join("\n");
 }
 
@@ -227,7 +235,23 @@ async function extractWarrantFromPages(pageFiles, label) {
       if (Array.isArray(data.lineItems)) merged.lineItems.push(...data.lineItems);
     }
   }
+  merged.lineItems = dedupeLineItemsByVoucher(merged.lineItems);
   return merged;
+}
+
+// Same duplicated-page problem as public/index.html's extractWarrant() —
+// see its comment for the confirmed real-data example and why Voucher # (not
+// vendor+amount) is the right key. Kept as a plain copy here since this
+// script runs standalone.
+function dedupeLineItemsByVoucher(lineItems) {
+  const seen = new Set();
+  return (lineItems || []).filter((li) => {
+    const v = li && li.voucher != null ? String(li.voucher).trim() : "";
+    if (!v) return true;
+    if (seen.has(v)) return false;
+    seen.add(v);
+    return true;
+  });
 }
 
 // Same fallback as the browser's openReview(): if no batch-summary table was
@@ -266,6 +290,7 @@ function toLineItems(merged, vendorAliases) {
     amount: round2(li.amount),
     exceedsPoBy: round2(li.exceedsPoBy || 0),
     batch: li.batch || "",
+    voucher: li.voucher || "",
   }));
 }
 

@@ -573,9 +573,24 @@ function categorize(rawLabel){
   return categorizeWithRules(state.taxonomy.rules, rawLabel);
 }
 
+// The "VENDOR REMIT NAME" cell on a bill schedule's invoice-detail pages
+// really holds two Munis-assigned numeric codes ahead of the name — a
+// vendor code (variable width, e.g. "14835") and a 5-digit zero-padded
+// remit code (e.g. "00000", "00001") — before the actual name. The vision
+// model usually drops both, but not reliably: confirmed on real saved data
+// where the SAME vendor on the SAME warrant came back as both "ADAM DEZAGO"
+// and "00000 ADAM DEZAGO" across different extraction calls, splitting one
+// vendor's spend across two different keys in buildVendors() below. Strip
+// any such leading numeric code(s) before alias-matching or returning the
+// raw name, so a leaked remit code can never create a second identity for
+// the same vendor.
+function stripVendorCodePrefix(s){
+  return s.replace(/^(?:\d{1,6}\s+)?\d{5}\s+(?=\S)/, "");
+}
 function normalizeVendorWithAliases(aliases, raw){
   let s = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s) return "Unknown vendor";
+  s = stripVendorCodePrefix(s);
   const lower = s.toLowerCase();
   for (const a of aliases) {
     if ((a.triggers || []).some(t => t && lower.includes(String(t).toLowerCase()))) return a.canonical;
@@ -677,16 +692,46 @@ function isImplausiblePoOverage(amount, exceedsPoBy){
   return over >= amt * PO_OVERAGE_IMPLAUSIBLE_MULTIPLE;
 }
 
+// A batch's summaryRows amount (from the batch-summary page) and the sum of
+// that same batch's own lineItems (from the invoice-detail pages) should
+// always agree — they're two independent reads of the same dollars.
+// Confirmed real failure mode: a duplicated/rescanned page in the source PDF
+// caused one batch's line items to be extracted twice, inflating that
+// batch's (and therefore the warrant's) vendor totals by ~$10,000 even
+// though the batch-summary total stayed correct — the two numbers disagreed
+// and nothing checked that until now. Skipped for synthesized summaryRows
+// (one row per line item, by construction — see summarySynthesized above,
+// there's nothing independent to check against).
+const BATCH_RECONCILE_TOLERANCE = 0.02;
+function batchReconciliationMismatches(w){
+  const rows = w.summaryRows || [];
+  if (!rows.length || rows.every(r => r.batch === "—")) return [];
+  const items = w.lineItems || [];
+  const byBatch = {};
+  items.forEach(li => {
+    const b = li.batch || "";
+    byBatch[b] = round2((byBatch[b] || 0) + (Number(li.amount) || 0));
+  });
+  return rows.filter(r => {
+    const b = r.batch || "";
+    if (!b || b === "—") return false;
+    return Math.abs((byBatch[b] || 0) - (Number(r.amount) || 0)) > BATCH_RECONCILE_TOLERANCE;
+  });
+}
+
 function reviewFlags(w){
   const flags = [];
   if (w.reconciled === false) flags.push({ key: "mismatch", label: "Reconciliation mismatch" });
   if (w.quality && w.quality !== "full") flags.push({ key: "partial", label: "Not full detail (" + w.quality + ")" });
   const rows = w.summaryRows || [];
-  if (rows.length && rows.every(r => r.batch === "—")) flags.push({ key: "synthesized", label: "Category rows guessed from line items" });
+  const synthesized = rows.length && rows.every(r => r.batch === "—");
+  if (synthesized) flags.push({ key: "synthesized", label: "Category rows guessed from line items" });
   const anomalies = (w.lineItems || []).filter(li => isAnomalousAmount(li.amount, vendorMedianCache[li.vendor]));
   if (anomalies.length) flags.push({ key: "anomaly", label: anomalies.length + " invoice" + (anomalies.length === 1 ? "" : "s") + " unusually large for vendor" });
   const implausiblePo = (w.lineItems || []).filter(li => isImplausiblePoOverage(li.amount, li.exceedsPoBy));
   if (implausiblePo.length) flags.push({ key: "po-mixup", label: implausiblePo.length + " invoice" + (implausiblePo.length === 1 ? "" : "s") + " with an implausible “exceeds PO” amount — check the source PDF" });
+  const batchMismatches = batchReconciliationMismatches(w);
+  if (batchMismatches.length) flags.push({ key: "batch-mismatch", label: batchMismatches.length + " batch" + (batchMismatches.length === 1 ? "" : "es") + " where line items don't add up to the batch total — check for a duplicated page in the source PDF" });
   return flags;
 }
 function computeNeedsReview(ws){
@@ -1575,6 +1620,7 @@ function extractionPrompt(startPage, endPage, totalPages){
     "- The first page of the whole document is a cover letter stating the warrant date and a grand total.",
     "- The second page of the whole document is a batch-summary table with columns BATCH | DEPARTMENT | AMOUNT | INVOICES.",
     "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description). Near the right edge of these invoice-detail pages there are often two separate numeric columns that are easy to confuse: \"EXCEEDS PO BY\" and \"PO BALANCE\". They are NOT the same thing: \"EXCEEDS PO BY\" is usually blank or \".00\" (most invoices do not exceed their purchase order), while \"PO BALANCE\" is a different, often much larger, running-balance figure that has nothing to do with exceeding the PO. Only read the \"EXCEEDS PO BY\" column for the exceedsPoBy field below — never substitute the \"PO BALANCE\" column's value for it, even though the two columns sit next to each other and look similar.",
+    "- Each invoice-detail line also has a \"VOUCHER\" column (a 5-digit number, distinct from both \"PO\" and \"DOCUMENT INVOICE\") — this is Munis's own unique ID for that line, and it's what's used below to tell two genuinely different invoices apart from the same invoice printed twice. Read it exactly as printed; never leave it blank if a number is visible in that column.",
     "",
     "From ONLY the pages shown in THESE images, extract this JSON object and reply with ONLY the JSON, no other text:",
     "{",
@@ -1582,9 +1628,9 @@ function extractionPrompt(startPage, endPage, totalPages){
     '  "coverTotal": number or null,',
     '  "warrantNo": "string like \\"24\\", or null",',
     '  "summaryRows": [{"batch":"string","department":"string","amount":number,"invoices":number}],',
-    '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number}]',
+    '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number,"voucher":"string or null"}]',
     "}",
-    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. Use null for anything not visible in these pages — other pages elsewhere in the document may supply it."
+    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. voucher must be the \"VOUCHER\" column's value specifically, as a string (e.g. \"95891\"); use null only if that column is genuinely blank for that line. Use null for anything else not visible in these pages — other pages elsewhere in the document may supply it."
   ].join("\n");
 }
 
@@ -1656,7 +1702,29 @@ async function extractWarrant(images, onProgress){
       if (Array.isArray(data.lineItems)) merged.lineItems.push(...data.lineItems);
     }
   }
+  merged.lineItems = dedupeLineItemsByVoucher(merged.lineItems);
   return merged;
+}
+
+// A scanned bill schedule can contain a fully duplicated section (confirmed
+// on real data: a 31-invoice batch printed/scanned twice in the same PDF),
+// and each invoice-detail page is read independently above with no notion
+// of "have I seen this invoice before" — so a duplicated page would
+// otherwise get extracted twice and double-count that vendor's spend.
+// Voucher # is Munis's own unique ID for a line (unlike vendor+amount,
+// which two different real invoices could share), so it's what's used to
+// tell a genuine repeat vendor charge apart from the same page scanned
+// twice. Only entries with a voucher are deduped — one without a voucher
+// (the model left that column unread) is kept as-is rather than guessed at.
+function dedupeLineItemsByVoucher(lineItems){
+  const seen = new Set();
+  return (lineItems || []).filter(li => {
+    const v = li && li.voucher != null ? String(li.voucher).trim() : "";
+    if (!v) return true;
+    if (seen.has(v)) return false;
+    seen.add(v);
+    return true;
+  });
 }
 
 function buildCategories(summaryRows){
@@ -1704,7 +1772,7 @@ function openReview(merged, file, queueLabel){
   // see vendorsInCategory() below.
   const lineItems = (merged.lineItems || []).map(r => ({
     vendor: r.vendor || "", description: r.description || "", amount: Number(r.amount) || 0,
-    exceedsPoBy: Number(r.exceedsPoBy) || 0, batch: r.batch || "", include: true,
+    exceedsPoBy: Number(r.exceedsPoBy) || 0, batch: r.batch || "", voucher: r.voucher || "", include: true,
   }));
   // Short warrants (often a single invoice) sometimes skip the batch-summary
   // page entirely — there's nothing there to categorize or reconcile
@@ -1813,7 +1881,7 @@ $("#reviewSave").addEventListener("click", async () => {
   // category) it belongs to — see vendorsInCategory().
   const lineItems = reviewCtx.lineItems
     .filter(r => r.include)
-    .map(r => ({ vendor: normalizeVendor(r.vendor), description: r.description, amount: round2(r.amount), exceedsPoBy: round2(r.exceedsPoBy || 0), batch: r.batch || "" }));
+    .map(r => ({ vendor: normalizeVendor(r.vendor), description: r.description, amount: round2(r.amount), exceedsPoBy: round2(r.exceedsPoBy || 0), batch: r.batch || "", voucher: r.voucher || "" }));
   const record = {
     dateISO, warrantNo: $("#rvNo").value || null, label: isoToLabel(dateISO),
     total, invoiceCount: reviewCtx.lineItems.filter(r => r.include).length || null,
