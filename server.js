@@ -28,6 +28,7 @@ const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5";
 const MAX_SOURCE_BYTES = 30 * 1024 * 1024; // 30MB — generous for a scanned bill schedule
 const BACKUP_KEEP = 14; // rotate: keep the most recent N backups
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // one scheduled backup a day
+const BACKFILL_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // how often the two backfills check for pending work
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -361,6 +362,19 @@ app.get("/api/search", (req, res) => {
   res.json({ results });
 });
 
+// How much of the ledger is actually reachable by /api/search above, so the
+// frontend can say so instead of leaving "No matches" to imply every PDF
+// was checked when some were never indexed — or never had a PDF stored at
+// all (warrants from before source-PDF storage existed: sourceFile is set
+// but sourcePdfPath isn't, so there's no file on disk for the backfill to
+// ever read, no matter how many times it's run).
+app.get("/api/search-coverage", (req, res) => {
+  const totalWarrants = db.prepare("SELECT COUNT(*) AS n FROM warrants").get().n;
+  const withSourcePdf = db.prepare("SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL").get().n;
+  const indexed = db.prepare("SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL AND pdfText IS NOT NULL AND trim(pdfText) <> ''").get().n;
+  res.json({ totalWarrants, withSourcePdf, indexed });
+});
+
 app.delete("/api/warrants/:id", (req, res) => {
   const row = getWarrantRow(req.params.id);
   if (row && row.sourcePdfPath) {
@@ -647,12 +661,53 @@ const BACKFILL_SCRIPTS = {
   "pdf-text": path.join(__dirname, "scripts", "backfill-pdf-text.js"),
 };
 const BACKFILL_LOG_MAX = 200000; // cap so a long run's output can't grow unbounded in memory
+const BACKFILL_HISTORY_MAX = 20; // per job, newest first
 const backfillJobs = {
-  "summary-rows": { running: false, log: "", startedAt: null, finishedAt: null, exitCode: null },
-  "pdf-text": { running: false, log: "", startedAt: null, finishedAt: null, exitCode: null },
+  "summary-rows": { running: false, log: "", startedAt: null, finishedAt: null, exitCode: null, history: [] },
+  "pdf-text": { running: false, log: "", startedAt: null, finishedAt: null, exitCode: null, history: [] },
 };
 
-function runBackfillJob(key, args) {
+// How many warrants each job would actually touch right now — the same
+// WHERE-clause logic each script applies itself (sourcePdfPath present,
+// detail missing), run directly against the already-open db connection so
+// checking is a single cheap query rather than spawning a child process.
+// Used by the scheduled check below to skip running a script that would
+// just print "nothing to backfill" — and to show a live count on the Setup
+// page without needing a run at all. A close approximation of each script's
+// own "is this empty" check (plain NULL/''/'[]' rather than a full JSON
+// parse), which only matters for malformed data too rare to worry about —
+// worst case a scheduled check runs the real script one day early.
+const BACKFILL_PENDING_COUNTERS = {
+  "summary-rows": () =>
+    db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL AND (summaryRows IS NULL OR summaryRows = '' OR summaryRows = '[]' OR lineItems IS NULL OR lineItems = '' OR lineItems = '[]')"
+      )
+      .get().n,
+  "pdf-text": () =>
+    db.prepare("SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL AND (pdfText IS NULL OR trim(pdfText) = '')").get().n,
+};
+
+function pushBackfillHistory(key, entry) {
+  const job = backfillJobs[key];
+  job.history.unshift({ at: new Date().toISOString(), ...entry });
+  if (job.history.length > BACKFILL_HISTORY_MAX) job.history.length = BACKFILL_HISTORY_MAX;
+}
+
+function lastLogLine(log) {
+  const lines = String(log || "")
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length ? lines[lines.length - 1] : "";
+}
+
+// trigger is "manual" (Setup page's Run button, via the API below) or
+// "scheduled" (the daily check further down) — recorded in job.history so
+// the Setup page can show which is which, since a scheduled run otherwise
+// looks identical to a manual one once it's in flight.
+function runBackfillJob(key, args, trigger) {
   const job = backfillJobs[key];
   if (job.running) return false;
   job.running = true;
@@ -660,6 +715,12 @@ function runBackfillJob(key, args) {
   job.startedAt = new Date().toISOString();
   job.finishedAt = null;
   job.exitCode = null;
+  let historyPushed = false;
+  const recordHistory = (outcome) => {
+    if (historyPushed) return;
+    historyPushed = true;
+    pushBackfillHistory(key, { trigger, outcome, summary: lastLogLine(job.log) || (outcome === "failed" ? "Failed to run." : "") });
+  };
   let child;
   try {
     child = spawn(process.execPath, [BACKFILL_SCRIPTS[key], ...args], { cwd: __dirname });
@@ -668,6 +729,7 @@ function runBackfillJob(key, args) {
     job.finishedAt = new Date().toISOString();
     job.exitCode = -1;
     job.log = `Failed to start: ${(e && e.message) || e}\n`;
+    recordHistory("failed");
     return true;
   }
   const append = (chunk) => {
@@ -681,11 +743,13 @@ function runBackfillJob(key, args) {
     job.exitCode = -1;
     job.finishedAt = new Date().toISOString();
     job.log += `\n[failed to run: ${(e && e.message) || e}]\n`;
+    recordHistory("failed");
   });
   child.on("close", (code) => {
     job.running = false;
     job.exitCode = code;
     job.finishedAt = new Date().toISOString();
+    recordHistory(code === 0 ? "completed" : "failed");
   });
   return true;
 }
@@ -703,16 +767,51 @@ app.post("/api/backfill/:job/run", (req, res) => {
     if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return res.status(400).json({ error: "That doesn't look like a warrant id." });
     args.push("--id=" + id);
   }
-  const started = runBackfillJob(key, args);
+  const started = runBackfillJob(key, args, "manual");
   if (!started) return res.status(409).json({ error: "This backfill is already running." });
   res.json({ ok: true });
 });
 
 app.get("/api/backfill/:job/status", (req, res) => {
-  const job = backfillJobs[req.params.job];
+  const key = req.params.job;
+  const job = backfillJobs[key];
   if (!job) return res.status(404).json({ error: "Unknown backfill job." });
-  res.json(job);
+  let pending = null;
+  try {
+    pending = BACKFILL_PENDING_COUNTERS[key]();
+  } catch (_) {
+    // leave pending null — the job cards below just hide the count
+  }
+  res.json({ ...job, pending });
 });
+
+// Runs once a day per job (see the schedule in app.listen below), same
+// cadence as the backup. Each check is just the pending count above — if
+// it's zero, the script is never even spawned, so a steady-state ledger
+// with nothing new to process costs nothing beyond that one query, forever.
+// Every check is recorded in job.history (whether it actually ran the
+// script or found nothing pending), so the Setup page shows what the
+// schedule has been doing without anyone having to watch it happen.
+function scheduledBackfillCheck(key) {
+  const job = backfillJobs[key];
+  if (job.running) {
+    pushBackfillHistory(key, { trigger: "scheduled", outcome: "skipped", summary: "Skipped — a run was already in progress." });
+    return;
+  }
+  let pending;
+  try {
+    pending = BACKFILL_PENDING_COUNTERS[key]();
+  } catch (e) {
+    pushBackfillHistory(key, { trigger: "scheduled", outcome: "failed", summary: `Couldn't check what's pending: ${(e && e.message) || e}` });
+    return;
+  }
+  if (!pending) {
+    pushBackfillHistory(key, { trigger: "scheduled", outcome: "skipped", summary: "Nothing pending — skipped without running." });
+    return;
+  }
+  console.log(`Scheduled check (${key}): ${pending} warrant${pending === 1 ? "" : "s"} pending — running.`);
+  runBackfillJob(key, [], "scheduled");
+}
 
 app.listen(PORT, () => {
   console.log(`Sutton Bill Ledger listening on :${PORT}`);
@@ -722,4 +821,13 @@ app.listen(PORT, () => {
   // restart: unless-stopped means this effectively runs daily in practice.
   setTimeout(runScheduledBackup, 60 * 1000);
   setInterval(runScheduledBackup, BACKUP_INTERVAL_MS);
+  // Same daily cadence for the two backfills, staggered a few minutes apart
+  // (and after the backup) so a restart doesn't fire all three at once.
+  // scheduledBackfillCheck itself skips the actual script when nothing's
+  // pending — see its comment above — so this is safe to leave running
+  // indefinitely even on a ledger that rarely gets new warrants.
+  setTimeout(() => scheduledBackfillCheck("pdf-text"), 3 * 60 * 1000);
+  setInterval(() => scheduledBackfillCheck("pdf-text"), BACKFILL_CHECK_INTERVAL_MS);
+  setTimeout(() => scheduledBackfillCheck("summary-rows"), 6 * 60 * 1000);
+  setInterval(() => scheduledBackfillCheck("summary-rows"), BACKFILL_CHECK_INTERVAL_MS);
 });

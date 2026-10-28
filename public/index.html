@@ -215,6 +215,7 @@ tbody tr:hover{background:var(--surface-2)}
   <section class="panel" style="margin-bottom:20px">
     <div class="panel-head"><h2>Search bill schedules</h2><span class="hint">Full text of every stored PDF — vendor names, PO numbers, dollar amounts, anything printed on the page</span></div>
     <input class="search" id="pdfSearch" placeholder="Search invoice text (e.g. a PO number, an exact amount, a vendor)…">
+    <div id="searchCoverage" class="hint" style="display:block;margin:7px 2px 0"></div>
     <div id="searchResults" hidden></div>
   </section>
 
@@ -779,6 +780,29 @@ async function loadWarrants(){
   renderAll();
 }
 
+// How much of the ledger full-text search can actually reach — shown above
+// the search box so "No matches" doesn't look like a blanket statement
+// about every PDF when some were never indexed, or never had a PDF stored
+// at all (see /api/search-coverage's comment in server.js). Loaded once on
+// boot and after a backfill-aware action wouldn't normally change it mid
+// -session, so it's not re-polled — reload the page after running a
+// backfill from Setup to see the updated count.
+async function loadSearchCoverage(){
+  const el = $("#searchCoverage");
+  if (!el) return;
+  try {
+    const c = await fetch("/api/search-coverage").then(r => r.json());
+    if (!c.totalWarrants) { el.textContent = ""; return; }
+    let msg = c.indexed + " of " + c.withSourcePdf + " warrant" + (c.withSourcePdf === 1 ? "" : "s") + " with a stored PDF " + (c.withSourcePdf === 1 ? "is" : "are") + " indexed for search.";
+    if (c.indexed < c.withSourcePdf) msg += " Run the full-text search backfill from Setup to index the rest.";
+    const noPdf = c.totalWarrants - c.withSourcePdf;
+    if (noPdf > 0) msg += " " + noPdf + " warrant" + (noPdf === 1 ? " has" : "s have") + " no PDF stored at all (uploaded before that existed) and can never be searched.";
+    el.textContent = msg;
+  } catch (e) {
+    el.textContent = "";
+  }
+}
+
 async function initApp(){
   try {
     const cfg = await fetch("/api/config").then(r => r.json());
@@ -797,6 +821,7 @@ async function initApp(){
   await loadVendorAliases();
   await loadBudgets();
   await loadWarrants();
+  loadSearchCoverage(); // not awaited — doesn't block the rest of the page
 }
 
 /* ---------------------------------------------------------------- *
@@ -1385,12 +1410,18 @@ function highlightSnippet(s, q){
 let searchDebounce = null;
 async function runPdfSearch(q){
   const box = $("#searchResults");
-  if (!q || q.trim().length < 3) { box.hidden = true; box.innerHTML = ""; return; }
+  const trimmed = (q || "").trim();
+  if (!trimmed) { box.hidden = true; box.innerHTML = ""; return; }
+  if (trimmed.length < 3) {
+    box.hidden = false;
+    box.innerHTML = '<div class="empty" style="padding:10px 0">Type at least 3 characters to search.</div>';
+    return;
+  }
   box.hidden = false;
   box.innerHTML = '<div class="empty" style="padding:10px 0">Searching…</div>';
   let data;
   try {
-    const res = await fetch("/api/search?q=" + encodeURIComponent(q.trim()));
+    const res = await fetch("/api/search?q=" + encodeURIComponent(trimmed));
     data = await res.json();
   } catch (e) {
     box.innerHTML = '<div class="empty" style="padding:10px 0">Search failed — try again.</div>';
@@ -1398,7 +1429,7 @@ async function runPdfSearch(q){
   }
   const results = data.results || [];
   if (!results.length) {
-    box.innerHTML = '<div class="empty" style="padding:10px 0"><b>No matches</b>Nothing in any stored PDF’s text matches that. Warrants uploaded before full-text search existed need <span class="mono">scripts/backfill-pdf-text.js</span> run once to be searchable.</div>';
+    box.innerHTML = '<div class="empty" style="padding:10px 0"><b>No matches</b>Nothing in any stored PDF’s indexed text matches that. If you expected a hit: check the coverage note above the search box — a warrant either hasn’t been indexed yet (run the full-text search backfill from Setup) or has no stored PDF at all and can never be searched that way, even though it still shows up in the category/vendor totals.</div>';
     return;
   }
   box.innerHTML = results.map(r => (

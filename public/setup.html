@@ -68,6 +68,7 @@ h2.page-title{font-size:21px;margin-bottom:4px}
 .job-status{font-size:12.5px;color:var(--ink-dim);margin-bottom:6px}
 .job-status.running{color:var(--accent)}
 .job-status.err{color:var(--bad)}
+.err{color:var(--bad)}
 .log-box{max-height:260px;overflow-y:auto;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-family:var(--font-mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:9px;font-size:13px;z-index:60;box-shadow:0 10px 30px rgba(0,0,0,.25)}
 .toast.good{background:var(--good)}
@@ -88,7 +89,7 @@ h2.page-title{font-size:21px;margin-bottom:4px}
 
 <main class="gutter">
   <h2 class="page-title">Backfills</h2>
-  <div class="lede">One-time scripts for warrants saved before a feature existed — safe to run more than once, since both only touch warrants that are actually missing the detail they add (unless "Force redo" is checked).</div>
+  <div class="lede">For warrants saved before a feature existed — safe to run more than once, since both only touch warrants that are actually missing the detail they add (unless "Force redo" is checked). Both also run automatically once a day; a day with nothing new just logs "nothing pending" below instead of actually running.</div>
 
   <div id="jobsContainer"></div>
 
@@ -153,7 +154,7 @@ const JOBS = [
 function jobCardHtml(job){
   return (
     '<div class="panel" data-job-card="' + job.key + '">' +
-      '<div class="panel-head"><h2>' + escapeHtml(job.name) + '</h2></div>' +
+      '<div class="panel-head"><h2>' + escapeHtml(job.name) + '</h2><span class="hint" data-pending></span></div>' +
       '<div class="desc">' + escapeHtml(job.desc) + '</div>' +
       '<div class="job-controls">' +
         '<label class="field-inline"><input type="checkbox" data-opt="dryRun" checked> Dry run (preview only, writes nothing)</label>' +
@@ -163,6 +164,10 @@ function jobCardHtml(job){
       '</div>' +
       '<div class="job-status" data-status>Not run yet this session.</div>' +
       '<pre class="log-box" data-log hidden></pre>' +
+      '<div style="margin-top:12px">' +
+        '<div style="font-size:11.5px;font-weight:600;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Recent runs</div>' +
+        '<div data-history class="empty" style="padding:10px 4px;text-align:left">No runs recorded yet this server process.</div>' +
+      '</div>' +
     '</div>'
   );
 }
@@ -173,6 +178,8 @@ function renderJobStatus(card, data){
   const statusEl = card.querySelector("[data-status]");
   const logEl = card.querySelector("[data-log]");
   const runBtn = card.querySelector("[data-run]");
+  const pendingEl = card.querySelector("[data-pending]");
+  const historyEl = card.querySelector("[data-history]");
   logEl.hidden = !data.log;
   if (data.log) logEl.textContent = data.log;
   logEl.scrollTop = logEl.scrollHeight;
@@ -187,6 +194,30 @@ function renderJobStatus(card, data){
   } else {
     statusEl.className = "job-status";
     statusEl.textContent = "Not run yet this session.";
+  }
+
+  if (typeof data.pending === "number") {
+    pendingEl.textContent = data.pending ? data.pending + " warrant" + (data.pending === 1 ? "" : "s") + " pending" : "Nothing pending";
+  } else {
+    pendingEl.textContent = "";
+  }
+
+  const history = data.history || [];
+  if (!history.length) {
+    historyEl.innerHTML = '<div class="empty" style="padding:10px 4px;text-align:left">No runs recorded yet this server process — the daily schedule and in-memory history both reset on restart, so this fills in as checks happen.</div>';
+  } else {
+    const outcomeLabel = { completed: "Ran", skipped: "Skipped", failed: "Failed" };
+    const outcomeClass = { completed: "", skipped: "", failed: "err" };
+    historyEl.innerHTML = '<table class="mini-table"><thead><tr><th>When</th><th>Trigger</th><th>Result</th><th>Detail</th></tr></thead><tbody>' +
+      history.map(h => (
+        '<tr>' +
+          '<td class="mono">' + escapeHtml(fmtWhen(h.at)) + '</td>' +
+          '<td>' + (h.trigger === "scheduled" ? "Scheduled" : "Manual") + '</td>' +
+          '<td class="' + (outcomeClass[h.outcome] || "") + '">' + escapeHtml(outcomeLabel[h.outcome] || h.outcome) + '</td>' +
+          '<td style="color:var(--ink-dim)">' + escapeHtml(h.summary || "") + '</td>' +
+        '</tr>'
+      )).join("") +
+      '</tbody></table>';
   }
 }
 

@@ -9,13 +9,13 @@ This is a self-hosted port of a [claude.ai Artifact](https://claude.ai) version 
 
 Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later. Click any row in "Spending by category" or "Spending by vendor" to drill into every row saved under it, across every warrant, each with a link straight to its source PDF. The category drill-down also breaks that category's spending out by vendor, and the vendor drill-down shows each line item's category right back — a batch-summary row is itself a total across however many invoices made up that batch, so both directions are a join (via the batch label each line item and summary row both carry) rather than a stored total, and only cover rows saved with that link; click a vendor or category name in either drill-down to jump straight to its own. If a bill schedule flags an invoice as exceeding its purchase order, that's kept too and surfaced as a badge on the warrant and in the vendor drill-down — a badge that looks implausibly large next to the invoice itself (many times the invoice amount) gets a distinct red warning instead, since that's usually a sign the extraction misread the PDF's "PO BALANCE" column rather than a genuine overage; it shows up in "Needs review" too, so you don't have to spot it by eye. Each warrant also has an editable notes field, in the review step or later from its detail view — handy for flagging something to ask about before a meeting.
 
-A "Needs review" tile flags any warrant that doesn't reconcile, isn't full detail, or had its category rows guessed from vendor line items instead of a real batch-summary table — click it to see the whole list and why, instead of noticing by accident. "Spending trends" breaks category totals out by fiscal year (July–June) against the year before, so a spike or drop stands out instead of being buried in the all-time total — set a budget per category there too (an "Edit budgets" button on the same panel) and each category shows what percent of it you've spent. And "Search bill schedules" runs a full-text search over every stored PDF's actual text — a PO number, an exact dollar amount, anything printed on the page — not just what made it into a category or vendor row.
+A "Needs review" tile flags any warrant that doesn't reconcile, isn't full detail, or had its category rows guessed from vendor line items instead of a real batch-summary table — click it to see the whole list and why, instead of noticing by accident. "Spending trends" breaks category totals out by fiscal year (July–June) against the year before, so a spike or drop stands out instead of being buried in the all-time total — set a budget per category there too (an "Edit budgets" button on the same panel) and each category shows what percent of it you've spent. And "Search bill schedules" runs a full-text search over every stored PDF's actual text — a PO number, an exact dollar amount, anything printed on the page — not just what made it into a category or vendor row. A line above the search box always shows how much of the ledger that search can actually reach (how many warrants are indexed, and how many have no stored PDF at all and can never be indexed), so a search that comes back empty tells you whether that's because nothing matched or because that warrant was never searchable in the first place.
 
 The ledger also backs itself up: once a day, and on demand from the "Backups" section at the bottom of the page, it snapshots the database and every stored PDF into one downloadable `.tar.gz`, keeping the last 14. "Export CSV" in the top bar gives you category/vendor totals; "Export line items" gives you every transaction as its own row instead, for a meeting packet or your own pivot tables.
 
 Each line item is also checked against that vendor's own history: if an invoice is unusually large relative to what that vendor normally runs (at least a few prior data points, and at least 3x the vendor's typical amount, with a dollar floor so a vendor that normally spends a few dollars doesn't get flagged for spending a few dollars more) it's flagged — on the "Needs review" tile, on the warrant's own detail view, in that vendor's drill-down, and live in the review step before you even save. "Settings" in the top bar opens an editor for the category taxonomy and vendor alias list themselves, so a shift in Sutton's batch naming or a new recurring vendor is a quick edit there instead of a code change and redeploy.
 
-"Setup" in the top bar opens a separate page for the two one-time backfill scripts below and for backups — run either backfill with a click (dry-run first if you want to preview, then for real) and watch its console output live, instead of needing a shell into the container.
+"Setup" in the top bar opens a separate page for the two backfill scripts below and for backups — run either with a click (dry-run first if you want to preview, then for real) and watch its console output live, instead of needing a shell into the container. Both also run automatically once a day on their own, and skip themselves (no process even spawned) on any day neither has new warrants to process — the Setup page's "Recent runs" list for each one shows whether a given run was manual or automatic and what it actually did, including the days it found nothing pending and did nothing.
 
 Everything else — the category taxonomy, vendor normalization, the review-before-save flow, sortable/resizable columns — is the same frontend code.
 
@@ -88,6 +88,24 @@ docker compose exec ledger node scripts/backfill-pdf-text.js --dry-run
 docker compose exec ledger node scripts/backfill-pdf-text.js
 ```
 
+### Automatic daily runs
+
+Both backfills above also run on their own once a day (staggered a few
+minutes apart, and after the daily backup, so a restart doesn't fire all
+three at once) — you don't need to remember to open Setup after every
+upload. Each day's check is a single, cheap count of how many warrants are
+actually missing that job's detail; if that count is zero, the script is
+never even spawned, so a ledger that isn't getting new uploads costs
+nothing beyond that one query, forever. The Setup page's "Recent runs" list
+for each job records every check this server process has made — whether it
+ran for real, found nothing pending and skipped itself, or failed — along
+with whether it was this automatic schedule or someone clicking "Run," so
+you can tell at a glance whether the daily run has been doing its job. That
+history is in-memory only and resets on a restart, same as the live log
+above it; it's a record of recent activity, not something to depend on
+long-term (the backfills themselves are still safe to just re-run by hand
+any time if you're ever unsure).
+
 ## API
 
 - `GET /api/config` — `{ extractionEnabled: boolean }`, whether `ANTHROPIC_API_KEY` is set.
@@ -99,14 +117,15 @@ docker compose exec ledger node scripts/backfill-pdf-text.js
 - `GET /api/export.csv` — category + vendor totals as a CSV download.
 - `GET /api/export-line-items.csv` — every included batch-summary row as its own CSV line (date, warrant #, batch, department, category, amount).
 - `GET /api/search?q=...` — full-text search over every stored PDF's extracted text (requires at least 3 characters); returns matching warrants with short snippets. The full text itself never leaves the server.
+- `GET /api/search-coverage` — `{ totalWarrants, withSourcePdf, indexed }`, so the frontend can show how much of the ledger `/api/search` can actually reach — `withSourcePdf` is warrants with a source PDF on disk at all, `indexed` is how many of those have been through the pdf-text backfill.
 - `GET /api/budgets` — every fiscal year's budgeted amount per category, as `{ "2026": { "Technology": 75000, ... }, ... }`.
 - `PUT /api/budgets/:fy` — replace one fiscal year's whole budget with the given `{category: amount}` map; a category left out is cleared for that FY.
 - `GET /api/backups` — list existing backup archives (name, size, created date).
 - `POST /api/backups` — trigger a fresh backup now (same thing the daily schedule does); returns its filename.
 - `GET /api/backups/:name` — download one backup archive.
 - `DELETE /api/backups/:name` — delete one backup archive.
-- `POST /api/backfill/:job/run` — start one of the backfill scripts (`:job` is `summary-rows` or `pdf-text`) as a background process, body `{ dryRun, force, id }` (all optional) mapped straight to that script's own `--dry-run`/`--force`/`--id=` flags. `409` if that job is already running; only one of each runs at a time.
-- `GET /api/backfill/:job/status` — `{ running, log, startedAt, finishedAt, exitCode }` for the most recent run of that job this server process has seen (in-memory only — resets on restart). The frontend (`public/setup.html`) polls this while `running` to show the script's console output live.
+- `POST /api/backfill/:job/run` — start one of the backfill scripts (`:job` is `summary-rows` or `pdf-text`) as a background process, body `{ dryRun, force, id }` (all optional) mapped straight to that script's own `--dry-run`/`--force`/`--id=` flags. `409` if that job is already running; only one of each runs at a time. The same two jobs also run automatically once a day — see "Automatic daily runs" above.
+- `GET /api/backfill/:job/status` — `{ running, log, startedAt, finishedAt, exitCode, pending, history }` for that job. `pending` is a live count of how many warrants that job would currently touch (computed fresh on every call, not cached). `history` is up to the last 20 runs this server process has made — manual or automatic, including ones that skipped themselves because nothing was pending — newest first, each `{ at, trigger: "manual"|"scheduled", outcome: "completed"|"skipped"|"failed", summary }`. All of this is in-memory only and resets on restart. The frontend (`public/setup.html`) polls the live fields while `running` to show the script's console output live, and renders `history` as a static table.
 - `GET /api/taxonomy` — the category-matching rules, in order: `{ rules: [{ name, groups, isDefault }, ...] }`. `groups` is disjunctive-normal-form — an array of OR'd groups, each an array of terms that must ALL appear (AND) in a department/batch label for that group to match. The one rule with `isDefault: true` is used when nothing else matches.
 - `PUT /api/taxonomy` — replace the whole rule list with `{ rules: [...] }`, same shape as the GET — names must be non-empty and unique, and exactly one rule must be `isDefault: true`.
 - `GET /api/vendor-aliases` — the vendor-alias list, in order: `{ aliases: [{ canonical, triggers }, ...] }`. Any invoice vendor name containing one of a row's triggers (case-insensitive substring match) is folded into that canonical name.
