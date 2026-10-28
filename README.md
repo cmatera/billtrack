@@ -15,6 +15,8 @@ The ledger also backs itself up: once a day, and on demand from the "Backups" se
 
 Each line item is also checked against that vendor's own history: if an invoice is unusually large relative to what that vendor normally runs (at least a few prior data points, and at least 3x the vendor's typical amount, with a dollar floor so a vendor that normally spends a few dollars doesn't get flagged for spending a few dollars more) it's flagged — on the "Needs review" tile, on the warrant's own detail view, in that vendor's drill-down, and live in the review step before you even save. "Settings" in the top bar opens an editor for the category taxonomy and vendor alias list themselves, so a shift in Sutton's batch naming or a new recurring vendor is a quick edit there instead of a code change and redeploy.
 
+"Setup" in the top bar opens a separate page for the two one-time backfill scripts below and for backups — run either backfill with a click (dry-run first if you want to preview, then for real) and watch its console output live, instead of needing a shell into the container.
+
 Everything else — the category taxonomy, vendor normalization, the review-before-save flow, sortable/resizable columns — is the same frontend code.
 
 ## Running it
@@ -29,8 +31,9 @@ A fresh install starts with an empty ledger — nothing is seeded. Upload your f
 
 ```
 server.js              Express app: static file server + /api routes
-public/index.html      The whole frontend (single file, no build step)
-scripts/               One-time maintenance scripts (see below)
+public/index.html      The main ledger page (single file, no build step)
+public/setup.html      Backups + one-time backfills, run from the browser (see below)
+scripts/               The same one-time maintenance scripts, runnable by hand or from public/setup.html
 data/warrants.db       The live SQLite store (gitignored; created at runtime)
 data/uploads/<id>/     Original source PDFs, one folder per warrant (gitignored)
 data/backups/          Downloadable backup archives, pruned to the last 14 (gitignored)
@@ -45,8 +48,13 @@ of them shows "No row-level detail saved." Since the original PDF is still
 on disk for any warrant that was uploaded through the browser, you don't
 need to re-upload it: `scripts/backfill-summary-rows.js` re-reads the stored
 PDF directly and re-runs the same extraction, filling in just the
-`summaryRows` detail (it never touches the totals or categories you already
-have). Run it inside the container, with the server already up:
+`summaryRows`/`lineItems` detail (it never touches the totals or categories
+you already have).
+
+Easiest way to run it: open **Setup** in the top bar of the ledger page,
+check "Dry run" to preview first, then uncheck it and run for real — the
+console output streams into the page as it goes. Or run it by hand inside
+the container, with the server already up:
 
 ```
 docker compose exec ledger node scripts/backfill-summary-rows.js --dry-run   # preview first
@@ -57,7 +65,8 @@ It only processes warrants that have a stored source PDF and no existing
 `summaryRows`, so it's safe to run more than once. Each warrant it touches
 costs about the same as a normal upload (a few cents of Anthropic API
 usage). Flags: `--id=<warrant-id>` to backfill just one, `--force` to redo
-one that already has detail.
+one that already has detail — both are exposed as fields on the Setup page
+too.
 
 ### Backfilling full-text search for older warrants
 
@@ -65,7 +74,8 @@ Full-text search only covers PDFs indexed after upload — a warrant saved
 before that existed isn't in the index yet. `scripts/backfill-pdf-text.js`
 fixes this with a local `pdftotext` pass over every stored PDF; it's pure
 text extraction, no Anthropic API calls, so there's no cost and it doesn't
-need the server running (it writes to the database directly):
+need the server running (it writes to the database directly). Same as
+above, run it from **Setup** in the top bar, or by hand:
 
 ```
 docker compose exec ledger node scripts/backfill-pdf-text.js --dry-run
@@ -89,6 +99,8 @@ docker compose exec ledger node scripts/backfill-pdf-text.js
 - `POST /api/backups` — trigger a fresh backup now (same thing the daily schedule does); returns its filename.
 - `GET /api/backups/:name` — download one backup archive.
 - `DELETE /api/backups/:name` — delete one backup archive.
+- `POST /api/backfill/:job/run` — start one of the backfill scripts (`:job` is `summary-rows` or `pdf-text`) as a background process, body `{ dryRun, force, id }` (all optional) mapped straight to that script's own `--dry-run`/`--force`/`--id=` flags. `409` if that job is already running; only one of each runs at a time.
+- `GET /api/backfill/:job/status` — `{ running, log, startedAt, finishedAt, exitCode }` for the most recent run of that job this server process has seen (in-memory only — resets on restart). The frontend (`public/setup.html`) polls this while `running` to show the script's console output live.
 - `GET /api/taxonomy` — the category-matching rules, in order: `{ rules: [{ name, groups, isDefault }, ...] }`. `groups` is disjunctive-normal-form — an array of OR'd groups, each an array of terms that must ALL appear (AND) in a department/batch label for that group to match. The one rule with `isDefault: true` is used when nothing else matches.
 - `PUT /api/taxonomy` — replace the whole rule list with `{ rules: [...] }`, same shape as the GET — names must be non-empty and unique, and exactly one rule must be `isDefault: true`.
 - `GET /api/vendor-aliases` — the vendor-alias list, in order: `{ aliases: [{ canonical, triggers }, ...] }`. Any invoice vendor name containing one of a row's triggers (case-insensitive substring match) is folded into that canonical name.

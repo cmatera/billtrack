@@ -194,6 +194,7 @@ tbody tr:hover{background:var(--surface-2)}
       <button class="btn ghost small" id="exportBtn" title="Export category &amp; vendor totals as CSV">Export CSV</button>
       <button class="btn ghost small" id="exportLineItemsBtn" title="Export every batch-summary row as its own CSV line — one per transaction, not just totals">Export line items</button>
       <button class="btn ghost small" id="settingsBtn" title="Edit the category taxonomy and vendor alias list used to categorize every upload">Settings</button>
+      <a class="btn ghost small" style="text-decoration:none" href="/setup.html" title="Backups and one-time backfill scripts">Setup</a>
       <button class="btn primary" id="uploadBtn">Upload bill schedule</button>
       <input type="file" id="fileInput" accept="application/pdf" multiple hidden>
     </div>
@@ -285,16 +286,6 @@ tbody tr:hover{background:var(--surface-2)}
     </div>
   </section>
 
-  <section class="panel" style="margin-top:20px">
-    <div class="panel-head">
-      <h2>Backups</h2>
-      <span class="hint">A fresh backup (database + every stored PDF) is created automatically once a day and the last 14 are kept</span>
-    </div>
-    <div style="margin-bottom:10px">
-      <button class="btn small" id="backupNowBtn">Back up now</button>
-    </div>
-    <div id="backupsBody"></div>
-  </section>
 
 </main>
 
@@ -1707,80 +1698,6 @@ async function uploadSourcePdf(id, file){
 }
 
 /* ---------------------------------------------------------------- *
- * Backups — a downloadable snapshot (database + every stored PDF) that's
- * also taken automatically once a day on the server; this panel just lists
- * what's on file and lets you grab one or trigger a fresh one.
- * ---------------------------------------------------------------- */
-function fmtBytes(n){
-  if (n < 1024) return n + " B";
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
-  return (n / (1024 * 1024)).toFixed(1) + " MB";
-}
-function fmtBackupDate(iso){
-  const d = new Date(iso);
-  if (isNaN(d)) return iso;
-  return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-async function renderBackups(){
-  const body = $("#backupsBody");
-  let data;
-  try {
-    const res = await fetch("/api/backups");
-    data = await res.json();
-  } catch (e) {
-    body.innerHTML = '<div class="empty"><b>Couldn’t load backups</b>Try reloading the page.</div>';
-    return;
-  }
-  const backups = data.backups || [];
-  if (!backups.length) {
-    body.innerHTML = '<div class="empty"><b>No backups yet</b>One is taken automatically about a minute after the server starts, then daily after that — or click "Back up now" above.</div>';
-    return;
-  }
-  body.innerHTML = '<table class="mini-table"><thead><tr>' +
-    '<th>Created</th><th style="text-align:right">Size</th><th></th>' +
-    '</tr></thead><tbody>' +
-    backups.map(b => (
-      '<tr>' +
-        '<td class="mono">' + escapeHtml(fmtBackupDate(b.createdAt)) + '</td>' +
-        '<td style="text-align:right" class="mono">' + fmtBytes(b.bytes) + '</td>' +
-        '<td style="text-align:right">' +
-          '<a class="btn small" style="text-decoration:none;margin-right:6px" href="/api/backups/' + encodeURIComponent(b.name) + '" title="Download this backup">Download</a>' +
-          '<button class="btn small" data-delete-backup="' + escapeHtml(b.name) + '" title="Delete this backup">Delete</button>' +
-        '</td>' +
-      '</tr>'
-    )).join("") +
-    '</tbody></table>';
-}
-$("#backupNowBtn").addEventListener("click", async () => {
-  const btn = $("#backupNowBtn");
-  btn.disabled = true;
-  btn.textContent = "Backing up…";
-  try {
-    const res = await fetch("/api/backups", { method: "POST" });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "backup failed");
-    toast("Backup created.", "good");
-    await renderBackups();
-  } catch (e) {
-    toast("Backup failed — " + (e && e.message ? e.message : "try again."), "bad");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Back up now";
-  }
-});
-$("#backupsBody").addEventListener("click", async (e) => {
-  const btn = e.target.closest("[data-delete-backup]");
-  if (!btn) return;
-  const name = btn.dataset.deleteBackup;
-  try {
-    const res = await fetch("/api/backups/" + encodeURIComponent(name), { method: "DELETE" });
-    if (!res.ok) throw new Error("delete failed");
-    await renderBackups();
-  } catch (e2) {
-    toast("Couldn't delete that backup.", "bad");
-  }
-});
-
-/* ---------------------------------------------------------------- *
  * Settings — the category taxonomy and vendor alias list, editable here
  * instead of requiring a code change + redeploy. Edits happen in a draft
  * copy (taxonomyDraft/aliasesDraft) and are only sent to the server (as two
@@ -1904,7 +1821,6 @@ $("#settingsSave").addEventListener("click", async () => {
  * ---------------------------------------------------------------- */
 initResizers();
 initApp();
-renderBackups();
 
 })();
 </script>

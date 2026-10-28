@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup — Sutton Bill Ledger</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+/* Same design tokens as index.html, trimmed to just what this page needs:
+   topbar, panels, buttons, a mini-table for the backups list, and a log box
+   for streaming a backfill script's console output. */
+:root{
+  --bg:#F3F5F7; --surface:#FFFFFF; --surface-2:#EAEEF1; --surface-3:#DEE5EA;
+  --ink:#1B232E; --ink-dim:#5B6672; --line:#D7DEE4;
+  --accent:#1F6F63; --accent-ink:#FFFFFF; --accent-soft:#E3EFEC;
+  --good:#2F7A4F; --good-soft:#E6F2EA; --warn:#B9802E; --warn-soft:#FBF0DE; --bad:#B23B3B; --bad-soft:#FBE8E7;
+  --font-display:"Archivo",system-ui,sans-serif; --font-body:"Public Sans",system-ui,sans-serif; --font-mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --bg:#11151B; --surface:#181D25; --surface-2:#1F2530; --surface-3:#272F3B;
+    --ink:#E6EAEE; --ink-dim:#9AA6B2; --line:#2B333E;
+    --accent:#4FAFA0; --accent-ink:#0B1310; --accent-soft:#1B2B28;
+    --good:#55C27E; --good-soft:#163523; --warn:#E0A94C; --warn-soft:#352A14; --bad:#E26B6B; --bad-soft:#391C1C;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#11151B; --surface:#181D25; --surface-2:#1F2530; --surface-3:#272F3B;
+  --ink:#E6EAEE; --ink-dim:#9AA6B2; --line:#2B333E;
+  --accent:#4FAFA0; --accent-ink:#0B1310; --accent-soft:#1B2B28;
+  --good:#55C27E; --good-soft:#163523; --warn:#E0A94C; --warn-soft:#352A14; --bad:#E26B6B; --bad-soft:#391C1C;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);line-height:1.45}
+.gutter{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+h1,h2,h3{font-family:var(--font-display);margin:0;text-wrap:balance}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.topbar{position:sticky;top:0;z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.topbar-inner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding-block:14px;max-width:900px;margin:0 auto}
+.brand{display:flex;align-items:baseline;gap:10px;min-width:0}
+.brand .mark{width:30px;height:30px;border-radius:7px;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:800;font-size:15px;flex:none}
+.brand h1{font-size:19px;font-weight:800;letter-spacing:-0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btn{font-family:var(--font-body);font-weight:600;font-size:13.5px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:9px 14px;cursor:pointer;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.btn:hover{border-color:var(--ink-dim)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.primary:hover{filter:brightness(1.05)}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.small{padding:6px 10px;font-size:12.5px}
+main{max-width:900px;margin:0 auto;padding-block:22px 60px}
+h2.page-title{font-size:21px;margin-bottom:4px}
+.lede{font-size:13px;color:var(--ink-dim);margin-bottom:20px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;margin-bottom:16px}
+.panel-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.panel-head h2{font-size:15.5px}
+.panel-head .hint{font-size:11.5px;color:var(--ink-dim)}
+.desc{font-size:12.5px;color:var(--ink-dim);margin-bottom:12px}
+.empty{padding:22px 4px;text-align:center;color:var(--ink-dim);font-size:13px}
+.empty b{display:block;color:var(--ink);font-family:var(--font-display);font-size:14.5px;margin-bottom:4px;font-weight:700}
+.mini-table{width:100%;font-size:12.5px;border-collapse:collapse}
+.mini-table th{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-dim);font-weight:600;text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.mini-table td{padding:6px 8px;border-bottom:1px solid var(--line)}
+.field-inline{display:flex;align-items:center;gap:6px;font-size:13px}
+.field-inline input[type="text"]{width:150px;padding:5px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--ink);font-family:var(--font-mono);font-size:12.5px}
+.job-controls{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.job-status{font-size:12.5px;color:var(--ink-dim);margin-bottom:6px}
+.job-status.running{color:var(--accent)}
+.job-status.err{color:var(--bad)}
+.log-box{max-height:260px;overflow-y:auto;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-family:var(--font-mono);font-size:11.5px;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:9px;font-size:13px;z-index:60;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.toast.good{background:var(--good)}
+.toast.bad{background:var(--bad)}
+</style>
+</head>
+<body>
+
+<div class="topbar gutter">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="mark">SB</div>
+      <div style="min-width:0"><h1>Setup</h1></div>
+    </div>
+    <a class="btn ghost small" style="text-decoration:none" href="/">← Back to ledger</a>
+  </div>
+</div>
+
+<main class="gutter">
+  <h2 class="page-title">Backfills</h2>
+  <div class="lede">One-time scripts for warrants saved before a feature existed — safe to run more than once, since both only touch warrants that are actually missing the detail they add (unless "Force redo" is checked).</div>
+
+  <div id="jobsContainer"></div>
+
+  <h2 class="page-title" style="margin-top:28px">Backups</h2>
+  <div class="lede">A fresh backup (database + every stored PDF) is created automatically once a day; the last 14 are kept.</div>
+  <section class="panel">
+    <div class="panel-head"><h2>Backups</h2><span class="hint" id="backupsHint"></span></div>
+    <div style="margin-bottom:10px">
+      <button class="btn small" id="backupNowBtn">Back up now</button>
+    </div>
+    <div id="backupsBody"></div>
+  </section>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(function(){
+"use strict";
+
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+
+function escapeHtml(s){
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function toast(msg, kind){
+  const el = $("#toast");
+  el.textContent = msg;
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.hidden = true; }, 4200);
+}
+function fmtWhen(iso){
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/* ---------------------------------------------------------------- *
+ * Backfill job cards — each posts to /api/backfill/<key>/run and then
+ * polls /api/backfill/<key>/status until the spawned script (the exact
+ * same scripts/*.js you'd otherwise run with `docker compose exec`) exits,
+ * showing its console output live. One job per key at a time; the server
+ * itself enforces that (a second "run" while one's in flight gets a 409).
+ * ---------------------------------------------------------------- */
+const JOBS = [
+  {
+    key: "summary-rows",
+    name: "Category & vendor row detail",
+    desc: "Re-reads each warrant's stored source PDF to fill in the per-row summaryRows/lineItems detail that powers the category and vendor drill-downs — for warrants saved before that existed. Calls the Anthropic API (a few cents per warrant, same as a normal upload), so the server needs ANTHROPIC_API_KEY configured.",
+  },
+  {
+    key: "pdf-text",
+    name: "Full-text PDF search index",
+    desc: "Runs pdftotext locally over each warrant's stored source PDF to index it for “Search bill schedules,” for warrants saved before that existed. Pure local text extraction — no Anthropic API calls, no cost.",
+  },
+];
+
+function jobCardHtml(job){
+  return (
+    '<div class="panel" data-job-card="' + job.key + '">' +
+      '<div class="panel-head"><h2>' + escapeHtml(job.name) + '</h2></div>' +
+      '<div class="desc">' + escapeHtml(job.desc) + '</div>' +
+      '<div class="job-controls">' +
+        '<label class="field-inline"><input type="checkbox" data-opt="dryRun" checked> Dry run (preview only, writes nothing)</label>' +
+        '<label class="field-inline"><input type="checkbox" data-opt="force"> Force redo</label>' +
+        '<label class="field-inline">Only warrant ID <input type="text" data-opt="id" placeholder="optional"></label>' +
+        '<button class="btn primary small" data-run style="margin-left:auto">Run</button>' +
+      '</div>' +
+      '<div class="job-status" data-status>Not run yet this session.</div>' +
+      '<pre class="log-box" data-log hidden></pre>' +
+    '</div>'
+  );
+}
+
+const pollTimers = {};
+
+function renderJobStatus(card, data){
+  const statusEl = card.querySelector("[data-status]");
+  const logEl = card.querySelector("[data-log]");
+  const runBtn = card.querySelector("[data-run]");
+  logEl.hidden = !data.log;
+  if (data.log) logEl.textContent = data.log;
+  logEl.scrollTop = logEl.scrollHeight;
+  runBtn.disabled = Boolean(data.running);
+  if (data.running) {
+    statusEl.className = "job-status running";
+    statusEl.textContent = "Running…" + (data.startedAt ? " (started " + fmtWhen(data.startedAt) + ")" : "");
+  } else if (data.finishedAt) {
+    const failed = data.exitCode !== 0;
+    statusEl.className = "job-status" + (failed ? " err" : "");
+    statusEl.textContent = (failed ? "Finished with an error" : "Finished") + " at " + fmtWhen(data.finishedAt) + ".";
+  } else {
+    statusEl.className = "job-status";
+    statusEl.textContent = "Not run yet this session.";
+  }
+}
+
+function startStatusLoop(key, card){
+  clearTimeout(pollTimers[key]);
+  async function tick(){
+    let data;
+    try {
+      const res = await fetch("/api/backfill/" + key + "/status");
+      data = await res.json();
+    } catch (e) {
+      return; // transient — the next click or page load will re-sync
+    }
+    renderJobStatus(card, data);
+    if (data.running) pollTimers[key] = setTimeout(tick, 1500);
+  }
+  tick();
+}
+
+async function runJob(key, card){
+  const dryRun = card.querySelector('[data-opt="dryRun"]').checked;
+  const force = card.querySelector('[data-opt="force"]').checked;
+  const id = card.querySelector('[data-opt="id"]').value.trim();
+  const btn = card.querySelector("[data-run]");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/backfill/" + key + "/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dryRun, force, id: id || undefined }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || "couldn't start");
+    }
+    startStatusLoop(key, card);
+  } catch (e) {
+    btn.disabled = false;
+    toast("Couldn't start — " + (e && e.message ? e.message : "try again."), "bad");
+  }
+}
+
+function initJobs(){
+  const container = $("#jobsContainer");
+  container.innerHTML = JOBS.map(jobCardHtml).join("");
+  JOBS.forEach(job => {
+    const card = container.querySelector('[data-job-card="' + job.key + '"]');
+    card.querySelector("[data-run]").addEventListener("click", () => runJob(job.key, card));
+    startStatusLoop(job.key, card); // picks up a run already in flight from before this page loaded
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * Backups — moved here from the main ledger page: a downloadable snapshot
+ * (database + every stored PDF) that's also taken automatically once a day
+ * on the server; this panel just lists what's on file and lets you grab
+ * one or trigger a fresh one.
+ * ---------------------------------------------------------------- */
+function fmtBytes(n){
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+function fmtBackupDate(iso){
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+async function renderBackups(){
+  const body = $("#backupsBody");
+  let data;
+  try {
+    const res = await fetch("/api/backups");
+    data = await res.json();
+  } catch (e) {
+    body.innerHTML = '<div class="empty"><b>Couldn’t load backups</b>Try reloading the page.</div>';
+    return;
+  }
+  const backups = data.backups || [];
+  $("#backupsHint").textContent = backups.length ? backups.length + " on file" : "";
+  if (!backups.length) {
+    body.innerHTML = '<div class="empty"><b>No backups yet</b>One is taken automatically about a minute after the server starts, then daily after that — or click "Back up now" above.</div>';
+    return;
+  }
+  body.innerHTML = '<table class="mini-table"><thead><tr>' +
+    '<th>Created</th><th style="text-align:right">Size</th><th></th>' +
+    '</tr></thead><tbody>' +
+    backups.map(b => (
+      '<tr>' +
+        '<td class="mono">' + escapeHtml(fmtBackupDate(b.createdAt)) + '</td>' +
+        '<td style="text-align:right" class="mono">' + fmtBytes(b.bytes) + '</td>' +
+        '<td style="text-align:right">' +
+          '<a class="btn small" style="text-decoration:none;margin-right:6px" href="/api/backups/' + encodeURIComponent(b.name) + '" title="Download this backup">Download</a>' +
+          '<button class="btn small" data-delete-backup="' + escapeHtml(b.name) + '" title="Delete this backup">Delete</button>' +
+        '</td>' +
+      '</tr>'
+    )).join("") +
+    '</tbody></table>';
+}
+$("#backupNowBtn").addEventListener("click", async () => {
+  const btn = $("#backupNowBtn");
+  btn.disabled = true;
+  btn.textContent = "Backing up…";
+  try {
+    const res = await fetch("/api/backups", { method: "POST" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "backup failed");
+    toast("Backup created.", "good");
+    await renderBackups();
+  } catch (e) {
+    toast("Backup failed — " + (e && e.message ? e.message : "try again."), "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Back up now";
+  }
+});
+$("#backupsBody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-delete-backup]");
+  if (!btn) return;
+  const name = btn.dataset.deleteBackup;
+  try {
+    const res = await fetch("/api/backups/" + encodeURIComponent(name), { method: "DELETE" });
+    if (!res.ok) throw new Error("delete failed");
+    await renderBackups();
+  } catch (e2) {
+    toast("Couldn't delete that backup.", "bad");
+  }
+});
+
+/* ---------------------------------------------------------------- *
+ * Boot
+ * ---------------------------------------------------------------- */
+initJobs();
+renderBackups();
+
+})();
+</script>
+</body>
+</html>

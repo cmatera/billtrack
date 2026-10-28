@@ -15,7 +15,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const Database = require("better-sqlite3");
 
 const PORT = process.env.PORT || 3000;
@@ -631,6 +631,88 @@ async function runScheduledBackup() {
     console.error("Scheduled backup failed:", (e && e.message) || e);
   }
 }
+
+// --- One-time backfill scripts, runnable from the Setup page -----------
+// Both scripts/backfill-summary-rows.js and scripts/backfill-pdf-text.js
+// were written to be run by hand (docker compose exec ledger node
+// scripts/...). This runs the exact same script as a child process instead
+// — same flags, same behavior, same safety (both are read-mostly and only
+// write warrants that are actually missing detail) — so the Setup page can
+// trigger one and poll its console output instead of requiring a shell.
+// One job per script at a time; state is in-memory only (lost on restart,
+// which only means the page shows "not run yet" again, not that anything
+// about the backfill itself is lost).
+const BACKFILL_SCRIPTS = {
+  "summary-rows": path.join(__dirname, "scripts", "backfill-summary-rows.js"),
+  "pdf-text": path.join(__dirname, "scripts", "backfill-pdf-text.js"),
+};
+const BACKFILL_LOG_MAX = 200000; // cap so a long run's output can't grow unbounded in memory
+const backfillJobs = {
+  "summary-rows": { running: false, log: "", startedAt: null, finishedAt: null, exitCode: null },
+  "pdf-text": { running: false, log: "", startedAt: null, finishedAt: null, exitCode: null },
+};
+
+function runBackfillJob(key, args) {
+  const job = backfillJobs[key];
+  if (job.running) return false;
+  job.running = true;
+  job.log = "";
+  job.startedAt = new Date().toISOString();
+  job.finishedAt = null;
+  job.exitCode = null;
+  let child;
+  try {
+    child = spawn(process.execPath, [BACKFILL_SCRIPTS[key], ...args], { cwd: __dirname });
+  } catch (e) {
+    job.running = false;
+    job.finishedAt = new Date().toISOString();
+    job.exitCode = -1;
+    job.log = `Failed to start: ${(e && e.message) || e}\n`;
+    return true;
+  }
+  const append = (chunk) => {
+    job.log += chunk.toString("utf8");
+    if (job.log.length > BACKFILL_LOG_MAX) job.log = job.log.slice(-BACKFILL_LOG_MAX);
+  };
+  child.stdout.on("data", append);
+  child.stderr.on("data", append);
+  child.on("error", (e) => {
+    job.running = false;
+    job.exitCode = -1;
+    job.finishedAt = new Date().toISOString();
+    job.log += `\n[failed to run: ${(e && e.message) || e}]\n`;
+  });
+  child.on("close", (code) => {
+    job.running = false;
+    job.exitCode = code;
+    job.finishedAt = new Date().toISOString();
+  });
+  return true;
+}
+
+app.post("/api/backfill/:job/run", (req, res) => {
+  const key = req.params.job;
+  if (!BACKFILL_SCRIPTS[key]) return res.status(404).json({ error: "Unknown backfill job." });
+  if (backfillJobs[key].running) return res.status(409).json({ error: "This backfill is already running." });
+  const body = req.body || {};
+  const args = [];
+  if (body.dryRun) args.push("--dry-run");
+  if (body.force) args.push("--force");
+  if (body.id) {
+    const id = String(body.id).trim();
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return res.status(400).json({ error: "That doesn't look like a warrant id." });
+    args.push("--id=" + id);
+  }
+  const started = runBackfillJob(key, args);
+  if (!started) return res.status(409).json({ error: "This backfill is already running." });
+  res.json({ ok: true });
+});
+
+app.get("/api/backfill/:job/status", (req, res) => {
+  const job = backfillJobs[req.params.job];
+  if (!job) return res.status(404).json({ error: "Unknown backfill job." });
+  res.json(job);
+});
 
 app.listen(PORT, () => {
   console.log(`Sutton Bill Ledger listening on :${PORT}`);
