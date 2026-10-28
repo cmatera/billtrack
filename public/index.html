@@ -386,6 +386,19 @@ tbody tr:hover{background:var(--surface-2)}
       <button class="x" id="categoryClose" aria-label="Close">×</button>
     </div>
     <div class="modal-body">
+      <h3 style="font-size:13.5px;margin-bottom:6px">Vendors in this category</h3>
+      <div class="desc" id="catVendorNote" style="font-size:11.5px;color:var(--ink-dim);margin-bottom:8px"></div>
+      <div class="scroll-box" style="margin-bottom:18px;max-height:220px">
+        <table class="mini-table">
+          <thead><tr>
+            <th title="Vendor name, normalized the same way as &quot;Spending by vendor.&quot; Click a row to see that vendor's own line items.">Vendor</th>
+            <th style="text-align:right" title="Total dollars this vendor received within this category, across every warrant on file.">Amount</th>
+            <th style="text-align:right" title="This vendor's share of the portion of this category that's linked to a vendor.">%</th>
+          </tr></thead>
+          <tbody id="catVendorBody"></tbody>
+        </table>
+      </div>
+      <h3 style="font-size:13.5px;margin-bottom:6px">All rows</h3>
       <div class="scroll-box">
         <table class="mini-table">
           <thead><tr>
@@ -1138,6 +1151,40 @@ async function saveDetailNotes(id){
 }
 $("#dtSaveNotes").addEventListener("click", () => { if (currentDetailId) saveDetailNotes(currentDetailId); });
 
+// A batch-summary row (what "Spending by category" drills into) is itself
+// an aggregate of however many vendor invoices made up that batch — it
+// doesn't carry a vendor on its own. Line items do, so a vendor breakdown
+// within one category has to join the two: for each warrant, collect the
+// batch labels of its summary rows in this category, then match that
+// warrant's line items to those same batch labels (case/whitespace
+// normalized). "—" is excluded from the join — it's the sentinel used
+// elsewhere for a row whose category was guessed from a line item rather
+// than read off a real batch table (see reviewFlags()'s "synthesized"
+// flag), where every row in the warrant shares that same placeholder and a
+// real batch match isn't possible. Only line items saved with a batch
+// (anything uploaded or backfilled after this was added) participate.
+function vendorsInCategory(name){
+  const totals = {};
+  let linkedTotal = 0;
+  allWarrants().forEach(w => {
+    const batches = new Set(
+      (w.summaryRows || [])
+        .filter(r => r.category === name)
+        .map(r => String(r.batch || "").trim().toLowerCase())
+        .filter(b => b && b !== "—")
+    );
+    if (!batches.size) return;
+    (w.lineItems || []).forEach(li => {
+      const b = String(li.batch || "").trim().toLowerCase();
+      if (!b || b === "—" || !batches.has(b)) return;
+      const amt = Number(li.amount) || 0;
+      totals[li.vendor] = round2((totals[li.vendor] || 0) + amt);
+      linkedTotal = round2(linkedTotal + amt);
+    });
+  });
+  return { totals, linkedTotal };
+}
+
 // Category rows (in "Spending by category") are the only place individual
 // row-level detail is kept — categories are assigned per batch-summary row,
 // not per vendor line item, so this is the real granularity of "a category
@@ -1154,6 +1201,24 @@ function openCategoryDetail(name){
   $("#catSub").textContent = rows.length
     ? fmtMoney(total) + " across " + rows.length + " row" + (rows.length === 1 ? "" : "s")
     : "No row-level detail saved for this category";
+
+  const { totals: vendorTotals, linkedTotal } = vendorsInCategory(name);
+  const vendorEntries = Object.entries(vendorTotals).sort((a, b) => b[1] - a[1]);
+  const vendorNote = $("#catVendorNote");
+  if (!vendorEntries.length) {
+    vendorNote.textContent = "Not linked yet — vendor detail here needs each line item saved with the batch it belongs to, which only warrants uploaded or backfilled after this was added have. Re-running the row-detail backfill (Setup → Category & vendor row detail, with “Force redo” checked) adds it for older warrants with a source PDF on file.";
+  } else if (total > 0 && linkedTotal < total - 0.02) {
+    vendorNote.textContent = fmtMoney(linkedTotal) + " linked to a vendor (" + (linkedTotal / total * 100).toFixed(0) + "% of this category's " + fmtMoney(total) + ") — the rest is from rows without a vendor link yet.";
+  } else {
+    vendorNote.textContent = "";
+  }
+  $("#catVendorBody").innerHTML = vendorEntries.length ? vendorEntries.map(([vendor, amt]) => (
+    '<tr data-vendor-link="' + escapeHtml(vendor) + '" title="Click to see every line item saved under this vendor.">' +
+      '<td>' + escapeHtml(vendor) + '</td>' +
+      '<td style="text-align:right" class="mono">' + fmtMoney(amt) + '</td>' +
+      '<td style="text-align:right" class="mono">' + (linkedTotal ? (amt / linkedTotal * 100).toFixed(1) : "0.0") + '%</td>' +
+    '</tr>'
+  )).join("") : '<tr><td colspan="3" style="text-align:center;color:var(--ink-dim);padding:10px 0">No vendor detail linked for this category yet.</td></tr>';
 
   $("#catDetailBody").innerHTML = rows.length ? rows.map(({ w, r }) => (
     '<tr>' +
@@ -1172,6 +1237,12 @@ function openCategoryDetail(name){
 $("#categoryBody").addEventListener("click", (e) => {
   const row = e.target.closest(".bar-row[data-cat]");
   if (row) openCategoryDetail(row.dataset.cat);
+});
+$("#catVendorBody").addEventListener("click", (e) => {
+  const row = e.target.closest("tr[data-vendor-link]");
+  if (!row) return;
+  $("#categoryModal").hidden = true;
+  openVendorDetail(row.dataset.vendorLink);
 });
 $("#categoryClose").addEventListener("click", () => { $("#categoryModal").hidden = true; });
 $("#categoryModal").addEventListener("click", (e) => { if (e.target.id === "categoryModal") $("#categoryModal").hidden = true; });
@@ -1539,9 +1610,12 @@ function openReview(merged, file, queueLabel){
     batch: r.batch || "", department: r.department || "", amount: Number(r.amount) || 0,
     category: categorize(r.department), include: true,
   }));
+  // batch is carried through (not just shown) so a line item can be linked
+  // back to the batch-summary row — and so the category — it belongs to;
+  // see vendorsInCategory() below.
   const lineItems = (merged.lineItems || []).map(r => ({
     vendor: r.vendor || "", description: r.description || "", amount: Number(r.amount) || 0,
-    exceedsPoBy: Number(r.exceedsPoBy) || 0, include: true,
+    exceedsPoBy: Number(r.exceedsPoBy) || 0, batch: r.batch || "", include: true,
   }));
   // Short warrants (often a single invoice) sometimes skip the batch-summary
   // page entirely — there's nothing there to categorize or reconcile
@@ -1642,9 +1716,11 @@ $("#reviewSave").addEventListener("click", async () => {
   // Per-line-item detail behind the vendor totals, keyed by the same
   // normalized vendor name "Spending by vendor" aggregates with, so the
   // vendor drill-down can match a vendor row back to its transactions.
+  // batch links a line item back to the batch-summary row (and therefore
+  // category) it belongs to — see vendorsInCategory().
   const lineItems = reviewCtx.lineItems
     .filter(r => r.include)
-    .map(r => ({ vendor: normalizeVendor(r.vendor), description: r.description, amount: round2(r.amount), exceedsPoBy: round2(r.exceedsPoBy || 0) }));
+    .map(r => ({ vendor: normalizeVendor(r.vendor), description: r.description, amount: round2(r.amount), exceedsPoBy: round2(r.exceedsPoBy || 0), batch: r.batch || "" }));
   const record = {
     dateISO, warrantNo: $("#rvNo").value || null, label: isoToLabel(dateISO),
     total, invoiceCount: reviewCtx.lineItems.filter(r => r.include).length || null,

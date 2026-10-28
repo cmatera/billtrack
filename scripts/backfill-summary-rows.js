@@ -239,13 +239,19 @@ function toSummaryRows(merged, taxonomyRules) {
 
 // Per-vendor-line detail, parallel to toSummaryRows() but for the vendor
 // side — this is what backfills the vendor drill-down and PO-overage
-// flags for warrants uploaded before the lineItems column existed.
+// flags for warrants uploaded before the lineItems column existed. batch
+// is kept too (not just vendor/description/amount) so public/index.html's
+// vendorsInCategory() can join a line item back to the batch-summary row —
+// and therefore category — it belongs to. A warrant backfilled before
+// batch was added here won't have it on its line items until this script
+// is re-run with --force.
 function toLineItems(merged, vendorAliases) {
   return (merged.lineItems || []).map((li) => ({
     vendor: normalizeVendorWithAliases(vendorAliases, li.vendor),
     description: li.description || "",
     amount: round2(li.amount),
     exceedsPoBy: round2(li.exceedsPoBy || 0),
+    batch: li.batch || "",
   }));
 }
 

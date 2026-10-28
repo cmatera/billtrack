@@ -7,7 +7,7 @@ This is a self-hosted port of a [claude.ai Artifact](https://claude.ai) version 
 - **Storage**: a SQLite database on disk (`data/warrants.db`), mounted as a Docker volume so it survives container rebuilds.
 - **PDF reading**: a direct call to the [Anthropic API](https://console.anthropic.com/) from the server, using your own API key. This is billed to your account — a typical warrant (40-90 pages, read in batches of 6) costs on the order of a few cents per upload.
 
-Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later. Click any row in "Spending by category" or "Spending by vendor" to drill into every row saved under it, across every warrant, each with a link straight to its source PDF. If a bill schedule flags an invoice as exceeding its purchase order, that's kept too and surfaced as a badge on the warrant and in the vendor drill-down. Each warrant also has an editable notes field, in the review step or later from its detail view — handy for flagging something to ask about before a meeting.
+Every warrant you save also keeps the original uploaded PDF on disk (`data/uploads/<warrant-id>/`), so you can reopen the exact source document later from that warrant's detail view — useful when someone asks "where did this number come from?" months later. Click any row in "Spending by category" or "Spending by vendor" to drill into every row saved under it, across every warrant, each with a link straight to its source PDF. The category drill-down also breaks that category's spending out by vendor — a batch-summary row is itself a total across however many invoices made up that batch, so this is a join (via the batch label each line item and summary row both carry) rather than a stored total, and only covers line items saved with that link; click a vendor there to jump straight into its own drill-down. If a bill schedule flags an invoice as exceeding its purchase order, that's kept too and surfaced as a badge on the warrant and in the vendor drill-down. Each warrant also has an editable notes field, in the review step or later from its detail view — handy for flagging something to ask about before a meeting.
 
 A "Needs review" tile flags any warrant that doesn't reconcile, isn't full detail, or had its category rows guessed from vendor line items instead of a real batch-summary table — click it to see the whole list and why, instead of noticing by accident. "Spending trends" breaks category totals out by fiscal year (July–June) against the year before, so a spike or drop stands out instead of being buried in the all-time total — set a budget per category there too (an "Edit budgets" button on the same panel) and each category shows what percent of it you've spent. And "Search bill schedules" runs a full-text search over every stored PDF's actual text — a PO number, an exact dollar amount, anything printed on the page — not just what made it into a category or vendor row.
 
@@ -67,6 +67,12 @@ costs about the same as a normal upload (a few cents of Anthropic API
 usage). Flags: `--id=<warrant-id>` to backfill just one, `--force` to redo
 one that already has detail — both are exposed as fields on the Setup page
 too.
+
+The same run also fills in the `batch` link each line item needs for the
+"Vendors in this category" breakdown in the category drill-down. A warrant
+backfilled (or uploaded) before that link was added only shows a note that
+vendor detail isn't linked yet for it — rerun this with "Force redo"
+checked (`--force`) to add it.
 
 ### Backfilling full-text search for older warrants
 
