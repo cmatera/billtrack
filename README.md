@@ -88,6 +88,26 @@ docker compose exec ledger node scripts/backfill-pdf-text.js --dry-run
 docker compose exec ledger node scripts/backfill-pdf-text.js
 ```
 
+Some bill schedules are scanned documents with no real text layer at
+all — `pdftotext` can only read text that's already embedded in the PDF,
+it can't read pixels, so a scanned warrant can come back with pdftotext
+finding nothing but a scanner's own page-number stamp. The backfill
+detects that case (too little text for the page count) and falls back to
+OCR (`ocrmypdf` + `tesseract`) automatically, only for the warrants that
+need it — a normal Munis warrant, which already has plenty of real text,
+never pays the OCR cost. A log line says which warrants needed it (e.g.
+`✓ 2026-08-20: 185 characters indexed. (needed OCR — this PDF has no real
+text layer)`), and OCR is noticeably slower per page than plain text
+extraction, so a run that picks up several scanned warrants at once will
+take longer than previous runs did. Upload-time indexing (when you first
+attach a PDF to a warrant) deliberately stays plain `pdftotext`-only, to
+keep uploads fast — a scanned upload just isn't searchable yet until the
+next backfill (manual, or the daily automatic one below) picks it up.
+`/api/search-coverage`'s "indexed" count (shown above the search box)
+accounts for this too, so a scanned-but-not-yet-OCR'd warrant correctly
+shows as not indexed rather than being counted as done just because its
+`pdfText` column isn't blank.
+
 ### Automatic daily runs
 
 Both backfills above also run on their own once a day (staggered a few
@@ -117,7 +137,7 @@ any time if you're ever unsure).
 - `GET /api/export.csv` — category + vendor totals as a CSV download.
 - `GET /api/export-line-items.csv` — every included batch-summary row as its own CSV line (date, warrant #, batch, department, category, amount).
 - `GET /api/search?q=...` — full-text search over every stored PDF's extracted text (requires at least 3 characters); returns matching warrants with short snippets. The full text itself never leaves the server.
-- `GET /api/search-coverage` — `{ totalWarrants, withSourcePdf, indexed }`, so the frontend can show how much of the ledger `/api/search` can actually reach — `withSourcePdf` is warrants with a source PDF on disk at all, `indexed` is how many of those have been through the pdf-text backfill.
+- `GET /api/search-coverage` — `{ totalWarrants, withSourcePdf, indexed }`, so the frontend can show how much of the ledger `/api/search` can actually reach — `withSourcePdf` is warrants with a source PDF on disk at all, `indexed` is how many of those have real, searchable text on file (not just a non-empty `pdfText` column — a scanned warrant that still needs OCR, see "Backfilling full-text search" above, correctly counts as not indexed here).
 - `GET /api/budgets` — every fiscal year's budgeted amount per category, as `{ "2026": { "Technology": 75000, ... }, ... }`.
 - `PUT /api/budgets/:fy` — replace one fiscal year's whole budget with the given `{category: amount}` map; a category left out is cleared for that FY.
 - `GET /api/backups` — list existing backup archives (name, size, created date).
@@ -139,4 +159,4 @@ any time if you're ever unsure).
 - Per-invoice anomaly flagging (an invoice unusually large for that vendor) is computed entirely in the browser from the line items already loaded — nothing is stored for it, so changing the thresholds (`ANOMALY_MIN_HISTORY`, `ANOMALY_MULTIPLE`, `ANOMALY_MIN_DELTA` near the top of the script in `public/index.html`) takes effect immediately on the next load, no migration needed.
 - The source PDFs have two adjacent, easily-confused columns on invoice-detail pages: "EXCEEDS PO BY" and "PO BALANCE". Older extractions could occasionally store the PO balance (a running total, often much larger) in the `exceedsPoBy` field instead of the real, usually blank/zero, overage — the extraction prompt now spells out the difference explicitly, so this shouldn't happen on new uploads or backfills going forward. To help find anything already saved with the mixup, any line item whose `exceedsPoBy` is at least `PO_OVERAGE_IMPLAUSIBLE_MULTIPLE` (3x, in `public/index.html`) times its own invoice amount gets a red "implausible, check the PDF" badge instead of the normal amber "exceeds PO" one — on the warrant detail view, the vendor drill-down, and the pre-save review step — and the warrant shows up in "Needs review" so you can find every affected warrant from one place rather than opening each PDF by hand. Once you've checked the PDF, re-run `scripts/backfill-summary-rows.js --force --id=<warrant-id>` (from the Setup page, with "Force redo" checked and that warrant's id filled in) to re-extract just that warrant with the corrected prompt, rather than re-running the backfill on everything.
 - `ANTHROPIC_MODEL` in `.env` lets you pin a specific model; see [Anthropic's model docs](https://docs.claude.com/en/docs/about-claude/models) for current ids.
-- Backups and full-text search depend on `poppler-utils` and `tar` being present in the image (both installed in the Dockerfile). A backup or PDF indexing attempt fails gracefully if either is missing — nothing else breaks — but you'll want to rebuild the image (`docker compose up -d --build`) if you're upgrading from a version of this app that predates them.
+- Backups and full-text search depend on `poppler-utils` and `tar` being present in the image (both installed in the Dockerfile). A backup or PDF indexing attempt fails gracefully if either is missing — nothing else breaks — but you'll want to rebuild the image (`docker compose up -d --build`) if you're upgrading from a version of this app that predates them. The OCR fallback for scanned PDFs (above) similarly depends on `ocrmypdf`, also installed in the Dockerfile; it pulls in `tesseract-ocr`, `ghostscript`, `qpdf`, `pikepdf` and a Python runtime as dependencies, so expect a noticeably larger image and longer build the first time you rebuild after upgrading to a version of this app that includes it. If `ocrmypdf` is missing for any reason, the backfill just keeps whatever plain `pdftotext` got for a sparse PDF instead of failing the run.

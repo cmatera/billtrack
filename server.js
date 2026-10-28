@@ -17,6 +17,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { execFileSync, spawn } = require("child_process");
 const Database = require("better-sqlite3");
+const { isLikelySparse, pdfPageCount } = require("./scripts/lib/pdf-text");
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
@@ -297,10 +298,16 @@ app.post("/api/warrants/:id/source", (req, res) => {
   const storedPath = path.join(dir, storedName);
   fs.writeFileSync(storedPath, buf);
 
-  // Index the PDF's text for /api/search. Best-effort: if poppler-utils
-  // isn't in this image yet (pre-dates its addition to the Dockerfile), the
-  // upload still succeeds — the warrant just won't be searchable until the
-  // image is rebuilt and scripts/backfill-pdf-text.js is run once.
+  // Index the PDF's text for /api/search. Deliberately plain pdftotext here,
+  // not the OCR-capable extractPdfText() in scripts/lib/pdf-text.js: OCR
+  // takes a couple of seconds per page, and this runs inside the upload
+  // HTTP request — fine for a handful of pages, not for a 30-page scanned
+  // bill schedule. If this upload turns out to be a scanned PDF with no
+  // real text layer, it just won't be searchable yet; the next backfill run
+  // (manual, or the daily automatic one — see BACKFILL_PENDING_COUNTERS)
+  // will notice the sparse result and OCR it then, off the request path.
+  // Also best-effort against a missing poppler-utils: if it's not in this
+  // image yet, the upload still succeeds and the backfill catches it later.
   let pdfText = null;
   try {
     pdfText = execFileSync("pdftotext", [storedPath, "-"], { maxBuffer: 20 * 1024 * 1024 }).toString("utf8");
@@ -368,10 +375,17 @@ app.get("/api/search", (req, res) => {
 // all (warrants from before source-PDF storage existed: sourceFile is set
 // but sourcePdfPath isn't, so there's no file on disk for the backfill to
 // ever read, no matter how many times it's run).
+//
+// "indexed" is defined by countPendingPdfText() below, not just "pdfText is
+// non-empty" — a scanned warrant can have non-empty pdfText that's really
+// just a page-number stamp (see scripts/lib/pdf-text.js), which is not
+// indexed in any useful sense even though the column isn't blank. Counting
+// those as indexed is exactly what let this coverage stat say "22 of 22"
+// while "AA Transportation" was unsearchable.
 app.get("/api/search-coverage", (req, res) => {
   const totalWarrants = db.prepare("SELECT COUNT(*) AS n FROM warrants").get().n;
   const withSourcePdf = db.prepare("SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL").get().n;
-  const indexed = db.prepare("SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL AND pdfText IS NOT NULL AND trim(pdfText) <> ''").get().n;
+  const indexed = withSourcePdf - countPendingPdfText();
   res.json({ totalWarrants, withSourcePdf, indexed });
 });
 
@@ -668,15 +682,34 @@ const backfillJobs = {
 };
 
 // How many warrants each job would actually touch right now — the same
-// WHERE-clause logic each script applies itself (sourcePdfPath present,
-// detail missing), run directly against the already-open db connection so
-// checking is a single cheap query rather than spawning a child process.
-// Used by the scheduled check below to skip running a script that would
-// just print "nothing to backfill" — and to show a live count on the Setup
-// page without needing a run at all. A close approximation of each script's
-// own "is this empty" check (plain NULL/''/'[]' rather than a full JSON
-// parse), which only matters for malformed data too rare to worry about —
-// worst case a scheduled check runs the real script one day early.
+// selection logic each script applies itself, run directly against the
+// already-open db connection so checking is a single cheap query (or, for
+// pdf-text, a handful of filesystem checks) rather than spawning a child
+// process. Used by the scheduled check below to skip running a script that
+// would just print "nothing to backfill" — and to show a live count on the
+// Setup page without needing a run at all.
+//
+// pdf-text can't stay pure SQL: a warrant with pdfText already populated can
+// still be pending if that text is too sparse to be real (see
+// scripts/lib/pdf-text.js) — the scanned-PDF case where pdftotext only ever
+// found a page-number stamp. Confirming that needs the actual PDF on disk
+// for a page count, exactly like backfill-pdf-text.js's own row filter, so
+// this mirrors that filter rather than approximating it in SQL.
+function countPendingPdfText() {
+  const rows = db.prepare("SELECT sourcePdfPath, pdfText FROM warrants WHERE sourcePdfPath IS NOT NULL").all();
+  let n = 0;
+  for (const row of rows) {
+    if (!row.pdfText || !row.pdfText.trim()) {
+      n++;
+      continue;
+    }
+    const pdfPath = path.join(UPLOADS_DIR, row.sourcePdfPath);
+    if (!pdfPath.startsWith(UPLOADS_DIR) || !fs.existsSync(pdfPath)) continue; // can't recheck it — don't count what we can't fix
+    if (isLikelySparse(row.pdfText, pdfPageCount(pdfPath))) n++;
+  }
+  return n;
+}
+
 const BACKFILL_PENDING_COUNTERS = {
   "summary-rows": () =>
     db
@@ -684,8 +717,7 @@ const BACKFILL_PENDING_COUNTERS = {
         "SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL AND (summaryRows IS NULL OR summaryRows = '' OR summaryRows = '[]' OR lineItems IS NULL OR lineItems = '' OR lineItems = '[]')"
       )
       .get().n,
-  "pdf-text": () =>
-    db.prepare("SELECT COUNT(*) AS n FROM warrants WHERE sourcePdfPath IS NOT NULL AND (pdfText IS NULL OR trim(pdfText) = '')").get().n,
+  "pdf-text": countPendingPdfText,
 };
 
 function pushBackfillHistory(key, entry) {
