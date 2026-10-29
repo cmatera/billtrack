@@ -145,6 +145,7 @@ function extractionPrompt(startPage, endPage, totalPages) {
     "- The second page of the whole document is a batch-summary table with columns BATCH | DEPARTMENT | AMOUNT | INVOICES.",
     "- Every later page is an invoice-detail page listing individual vendor invoices for one batch (vendor, amount, description). Near the right edge of these invoice-detail pages there are often two separate numeric columns that are easy to confuse: \"EXCEEDS PO BY\" and \"PO BALANCE\". They are NOT the same thing: \"EXCEEDS PO BY\" is usually blank or \".00\" (most invoices do not exceed their purchase order), while \"PO BALANCE\" is a different, often much larger, running-balance figure that has nothing to do with exceeding the PO. Only read the \"EXCEEDS PO BY\" column for the exceedsPoBy field below — never substitute the \"PO BALANCE\" column's value for it, even though the two columns sit next to each other and look similar.",
     "- Each invoice-detail line also has a \"VOUCHER\" column (a 5-digit number, distinct from both \"PO\" and \"DOCUMENT INVOICE\") — this is Munis's own unique ID for that line, and it's what's used below to tell two genuinely different invoices apart from the same invoice printed twice. Read it exactly as printed; never leave it blank if a number is visible in that column.",
+    "- Below each voucher's invoice line, one or more GL allocation lines follow, each showing an account code (two numbers, e.g. \"42260010 57000\" or \"S0198030 61355\") and a dollar amount. A single invoice is very often split across two or more GL lines — sometimes across different funding sources (part from a Town Capital account prefixed \"S0...\", part from a Revolving Fund account prefixed \"S1...\", part from an ordinary General Fund account with no letter prefix). Capture EVERY GL line for that voucher, not just the first one — a GL line can be visually separated from the others, wrapping past an address block near the bottom of the page. The GL line amounts, summed, MUST equal that line's NET AMOUNT — if what you've captured doesn't add up to the NET AMOUNT you read, look again for a GL line you missed rather than reporting a value that doesn't reconcile.",
     "",
     "From ONLY the pages shown in THESE images, extract this JSON object and reply with ONLY the JSON, no other text:",
     "{",
@@ -152,9 +153,9 @@ function extractionPrompt(startPage, endPage, totalPages) {
     '  "coverTotal": number or null,',
     '  "warrantNo": "string like \\"24\\", or null",',
     '  "summaryRows": [{"batch":"string","department":"string","amount":number,"invoices":number}],',
-    '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number,"voucher":"string or null"}]',
+    '  "lineItems": [{"batch":"string","vendor":"string","amount":number,"description":"string","exceedsPoBy":number,"voucher":"string or null","glLines":[{"account":"string","amount":number}]}]',
     "}",
-    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. voucher must be the \"VOUCHER\" column's value specifically, as a string (e.g. \"95891\"); use null only if that column is genuinely blank for that line. Use null for anything else not visible in these pages — other pages elsewhere in the document may supply it.",
+    "Omit summaryRows entries unless a batch-summary table page is in these images. Include a lineItems entry for every invoice line visible on any invoice-detail page in these images. exceedsPoBy must be the dollar value of the \"EXCEEDS PO BY\" column specifically — use 0 when that column is blank, \".00\", or not printed on that line; do NOT use the \"PO BALANCE\" column's value for this field under any circumstances. voucher must be the \"VOUCHER\" column's value specifically, as a string (e.g. \"95891\"); use null only if that column is genuinely blank for that line. glLines must list every GL allocation line belonging to that voucher, each with its account code exactly as printed (both numbers, e.g. \"42260010 57000\") and its own dollar amount; use an empty array only if no GL lines are visible for that line in these pages. Use null for anything else not visible in these pages — other pages elsewhere in the document may supply it.",
   ].join("\n");
 }
 
@@ -291,6 +292,9 @@ function toLineItems(merged, vendorAliases) {
     exceedsPoBy: round2(li.exceedsPoBy || 0),
     batch: li.batch || "",
     voucher: li.voucher || "",
+    glLines: Array.isArray(li.glLines)
+      ? li.glLines.map((g) => ({ account: String(g.account || "").trim(), amount: round2(g.amount) }))
+      : [],
   }));
 }
 
