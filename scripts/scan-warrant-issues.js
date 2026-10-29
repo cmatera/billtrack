@@ -12,6 +12,15 @@
 //
 //   docker compose exec ledger node scripts/scan-warrant-issues.js
 //
+// Pass --id=<warrant-id> to instead audit ONE warrant in full: every batch
+// label appearing in EITHER summaryRows or lineItems (not just batches that
+// already have a summaryRows row), so a batch whose dollars went missing
+// from the normal scan can be checked for whether they reappeared under a
+// different/wrong batch label (a mislabeling bug) rather than being lost
+// outright by a page that was never extracted at all.
+//
+//   docker compose exec ledger node scripts/scan-warrant-issues.js --id=2026-06-25
+//
 // Flags two independent signatures per warrant, either of which means
 // "affected" (mirrors reviewFlags()/batchReconciliationMismatches() in
 // public/index.html and stripVendorCodePrefix() in backfill-summary-rows.js,
@@ -72,6 +81,38 @@ function batchMismatches(summaryRows, lineItems) {
     .map((b) => ({ batch: b, summaryAmount: summaryByBatch[b], lineItemsAmount: byBatch[b] || 0 }));
 }
 
+// Full per-batch audit for one warrant: union of every batch label seen in
+// EITHER summaryRows or lineItems, so a batch mislabeled onto the wrong key
+// (dollars that look "missing" from one batch but are actually sitting
+// under a different/unexpected batch label in lineItems) is visible, not
+// just batches that already have a matching summaryRows row.
+function auditBatches(summaryRows, lineItems) {
+  const rows = summaryRows || [];
+  const items = lineItems || [];
+  const summaryByBatch = {};
+  rows.forEach((r) => {
+    const b = r.batch || "";
+    if (!b || b === "—") return;
+    summaryByBatch[b] = round2((summaryByBatch[b] || 0) + (Number(r.amount) || 0));
+  });
+  const byBatch = {};
+  const countByBatch = {};
+  items.forEach((li) => {
+    const b = li.batch || "";
+    byBatch[b] = round2((byBatch[b] || 0) + (Number(li.amount) || 0));
+    countByBatch[b] = (countByBatch[b] || 0) + 1;
+  });
+  const allBatches = new Set([...Object.keys(summaryByBatch), ...Object.keys(byBatch)]);
+  return Array.from(allBatches)
+    .sort()
+    .map((b) => ({
+      batch: b,
+      summaryAmount: Object.prototype.hasOwnProperty.call(summaryByBatch, b) ? summaryByBatch[b] : null,
+      lineItemsAmount: Object.prototype.hasOwnProperty.call(byBatch, b) ? byBatch[b] : null,
+      lineItemsCount: countByBatch[b] || 0,
+    }));
+}
+
 function vendorPrefixCollisions(vendors) {
   const keys = Object.keys(vendors || {});
   const keySet = new Set(keys);
@@ -86,11 +127,38 @@ function vendorPrefixCollisions(vendors) {
 }
 
 function main() {
+  const args = process.argv.slice(2);
+  const ONLY_ID = (args.find((a) => a.startsWith("--id=")) || "").slice(5) || null;
+
   if (!require("fs").existsSync(DB_FILE)) {
     console.error(`No database found at ${DB_FILE}`);
     process.exit(1);
   }
   const db = new Database(DB_FILE);
+
+  if (ONLY_ID) {
+    const row = db.prepare("SELECT * FROM warrants WHERE id = ?").get(ONLY_ID);
+    if (!row) {
+      console.error(`No warrant found with id ${ONLY_ID}`);
+      process.exit(1);
+    }
+    const summaryRows = row.summaryRows ? JSON.parse(row.summaryRows) : [];
+    const lineItems = row.lineItems ? JSON.parse(row.lineItems) : [];
+    const audit = auditBatches(summaryRows, lineItems);
+    console.log(`${ONLY_ID} (${row.label || row.dateISO}) — full batch audit:\n`);
+    audit.forEach((a) => {
+      const summaryStr = a.summaryAmount === null ? "NO SUMMARY ROW" : a.summaryAmount;
+      const itemsStr = a.lineItemsAmount === null ? "NO LINE ITEMS" : `${a.lineItemsAmount} (${a.lineItemsCount} item${a.lineItemsCount === 1 ? "" : "s"})`;
+      const mismatch =
+        a.summaryAmount !== null &&
+        a.lineItemsAmount !== null &&
+        Math.abs(a.summaryAmount - a.lineItemsAmount) > BATCH_RECONCILE_TOLERANCE;
+      const flag = a.summaryAmount === null || a.lineItemsAmount === null || mismatch ? "  <-- check" : "";
+      console.log(`  batch ${a.batch}: summary ${summaryStr}  |  line items ${itemsStr}${flag}`);
+    });
+    return;
+  }
+
   const rows = db
     .prepare(
       "SELECT id, dateISO, label, total, invoiceCount, summaryRows, lineItems, vendors FROM warrants ORDER BY dateISO"
