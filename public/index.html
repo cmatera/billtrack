@@ -703,20 +703,33 @@ function isImplausiblePoOverage(amount, exceedsPoBy){
 // (one row per line item, by construction — see summarySynthesized above,
 // there's nothing independent to check against).
 const BATCH_RECONCILE_TOLERANCE = 0.02;
+// A single batch number can legitimately carry more than one summaryRows
+// entry — e.g. one batch split across two departments/categories (confirmed
+// real case: batch 1057 = Maintenance $16,897.28 + Summer Camp Revolving
+// $101.37, which together match that batch's 7 line items exactly). So the
+// comparison has to be batch-vs-batch (summaryRows amounts for that batch,
+// summed, vs lineItems amounts for that batch, summed) — comparing each
+// individual summaryRows row against the whole batch's line-item total was
+// a false-positive generator, flagging every row of a split batch even when
+// the batch as a whole reconciled perfectly.
 function batchReconciliationMismatches(w){
   const rows = w.summaryRows || [];
   if (!rows.length || rows.every(r => r.batch === "—")) return [];
   const items = w.lineItems || [];
+  const summaryByBatch = {};
+  rows.forEach(r => {
+    const b = r.batch || "";
+    if (!b || b === "—") return;
+    summaryByBatch[b] = round2((summaryByBatch[b] || 0) + (Number(r.amount) || 0));
+  });
   const byBatch = {};
   items.forEach(li => {
     const b = li.batch || "";
     byBatch[b] = round2((byBatch[b] || 0) + (Number(li.amount) || 0));
   });
-  return rows.filter(r => {
-    const b = r.batch || "";
-    if (!b || b === "—") return false;
-    return Math.abs((byBatch[b] || 0) - (Number(r.amount) || 0)) > BATCH_RECONCILE_TOLERANCE;
-  });
+  return Object.keys(summaryByBatch)
+    .filter(b => Math.abs((byBatch[b] || 0) - summaryByBatch[b]) > BATCH_RECONCILE_TOLERANCE)
+    .map(b => ({ batch: b, summaryAmount: summaryByBatch[b], lineItemsAmount: byBatch[b] || 0 }));
 }
 
 function reviewFlags(w){

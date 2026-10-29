@@ -46,21 +46,30 @@ function stripVendorCodePrefix(s) {
   return String(s || "").replace(/^(?:\d{1,6}\s+)?\d{5}\s+(?=\S)/, "");
 }
 
-// Same logic as batchReconciliationMismatches() in public/index.html.
+// Same logic as batchReconciliationMismatches() in public/index.html. A
+// batch number can legitimately carry more than one summaryRows entry (one
+// batch split across departments/categories), so this compares batch-vs-
+// batch totals (summaryRows amounts for a batch, summed, vs lineItems
+// amounts for that batch, summed) rather than flagging each individual
+// summaryRows row against the whole batch's line-item total.
 function batchMismatches(summaryRows, lineItems) {
   const rows = summaryRows || [];
   if (!rows.length || rows.every((r) => r.batch === "—")) return [];
+  const summaryByBatch = {};
+  rows.forEach((r) => {
+    const b = r.batch || "";
+    if (!b || b === "—") return;
+    summaryByBatch[b] = round2((summaryByBatch[b] || 0) + (Number(r.amount) || 0));
+  });
   const items = lineItems || [];
   const byBatch = {};
   items.forEach((li) => {
     const b = li.batch || "";
     byBatch[b] = round2((byBatch[b] || 0) + (Number(li.amount) || 0));
   });
-  return rows.filter((r) => {
-    const b = r.batch || "";
-    if (!b || b === "—") return false;
-    return Math.abs((byBatch[b] || 0) - (Number(r.amount) || 0)) > BATCH_RECONCILE_TOLERANCE;
-  });
+  return Object.keys(summaryByBatch)
+    .filter((b) => Math.abs((byBatch[b] || 0) - summaryByBatch[b]) > BATCH_RECONCILE_TOLERANCE)
+    .map((b) => ({ batch: b, summaryAmount: summaryByBatch[b], lineItemsAmount: byBatch[b] || 0 }));
 }
 
 function vendorPrefixCollisions(vendors) {
@@ -101,11 +110,13 @@ function main() {
       affectedCount++;
       console.log(`\n${row.id} (${row.label || row.dateISO}):`);
       if (mismatches.length) {
-        console.log(
-          `  batch-mismatch: ${mismatches.length} batch(es) don't reconcile — batch ${mismatches
-            .map((m) => m.batch)
-            .join(", ")}`
-        );
+        console.log(`  batch-mismatch: ${mismatches.length} batch(es) don't reconcile:`);
+        mismatches.forEach((m) => {
+          const diff = round2(m.lineItemsAmount - m.summaryAmount);
+          console.log(
+            `    batch ${m.batch}: summary ${m.summaryAmount}  vs  line items ${m.lineItemsAmount}  (${diff > 0 ? "+" : ""}${diff})`
+          );
+        });
       }
       if (collisions.length) {
         console.log(
