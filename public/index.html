@@ -1234,13 +1234,91 @@ function renderWarrantTable(){
 }
 
 let currentDetailId = null;
-function openDetail(id){
+// Line-items table state for the detail modal — reset on every openDetail()
+// call, mutated by the delegated click handlers below (category-row filter,
+// column-header sort, vendor-section collapse), each of which just re-runs
+// renderDetailModal() rather than reopening the modal from scratch.
+let dtCategoryFilter = null;
+let dtLineSort = { key: "batch", dir: "asc" };
+let dtVendorOpen = false;
+
+function sortDtItems(items){
+  const { key, dir } = dtLineSort;
+  return items.slice().sort((a, b) => {
+    let av, bv;
+    if (key === "amount" || key === "exceedsPoBy") {
+      av = Number(a[key]) || 0; bv = Number(b[key]) || 0;
+      return dir === "asc" ? av - bv : bv - av;
+    }
+    if (key === "unusual") {
+      av = isAnomalousAmount(a.amount, vendorMedianCache[a.vendor]) ? 1 : 0;
+      bv = isAnomalousAmount(b.amount, vendorMedianCache[b.vendor]) ? 1 : 0;
+      return dir === "asc" ? av - bv : bv - av;
+    }
+    av = key === "fund" ? glFundTypes(a).join(", ") : String(a[key] || "");
+    bv = key === "fund" ? glFundTypes(b).join(", ") : String(b[key] || "");
+    const c = av.localeCompare(bv);
+    return dir === "asc" ? c : -c;
+  });
+}
+
+// Rebuilds just the "Line items" section's HTML (header badges / category /
+// vendor tables are built by renderDetailModal() around this) — pulled into
+// its own function since it's rebuilt on every sort-header click without
+// touching the rest of the modal.
+function renderDtLineItemsTable(w){
+  let items = w.lineItems || [];
+  if (dtCategoryFilter) items = items.filter(li => categoryForLineItem(w, li) === dtCategoryFilter);
+  items = sortDtItems(items);
+  const arrow = key => dtLineSort.key === key ? (dtLineSort.dir === "asc" ? " ▲" : " ▼") : "";
+  const th = (key, label, rightAlign) => '<th' + (rightAlign ? ' style="text-align:right"' : '') +
+    '><button class="th-sort" data-sort-key="' + key + '">' + label + arrow(key) + '</button></th>';
+  let html = '<h3 style="font-size:13.5px;margin:16px 0 8px">Line items' +
+    (dtCategoryFilter
+      ? ' — <span style="font-weight:400;color:var(--ink-dim)">' + escapeHtml(dtCategoryFilter) +
+        ' <a href="#" data-clear-category style="text-decoration:underline;text-decoration-style:dotted">clear</a></span>'
+      : '') +
+    '</h3>';
+  if (!items.length) {
+    html += '<div class="empty" style="padding:10px 0">' +
+      (dtCategoryFilter ? "No line items linked to this category yet." : "No line-item detail saved for this warrant — it predates per-line-item capture, or has no source PDF on file.") +
+      '</div>';
+    return html;
+  }
+  html += '<div class="scroll-box"><table class="mini-table">' +
+    '<thead><tr>' +
+      th("batch", "Batch") + th("voucher", "Voucher") + th("vendor", "Vendor") + th("description", "Description") +
+      th("amount", "Amount", true) + th("exceedsPoBy", "Exceeds PO", true) + th("unusual", "Unusual?", true) + th("fund", "Fund") +
+    '</tr></thead><tbody>' +
+    items.map(li => {
+      const anomalous = isAnomalousAmount(li.amount, vendorMedianCache[li.vendor]);
+      const implausiblePo = isImplausiblePoOverage(li.amount, li.exceedsPoBy);
+      const glSum = glLinesSum(li);
+      const glMismatch = (li.glLines || []).length && Math.abs(glSum - round2(li.amount)) > GL_SUM_TOLERANCE;
+      const fundTypes = glFundTypes(li);
+      return '<tr>' +
+        '<td class="mono">' + escapeHtml(li.batch || "—") + '</td>' +
+        '<td class="mono">' + escapeHtml(li.voucher || "—") + '</td>' +
+        '<td>' + escapeHtml(li.vendor || "") + '</td>' +
+        '<td>' + escapeHtml(li.description || "") + '</td>' +
+        '<td style="text-align:right" class="mono">' + fmtMoney(li.amount) + '</td>' +
+        '<td style="text-align:right" class="mono">' + (Number(li.exceedsPoBy) > 0
+          ? (implausiblePo
+            ? '<span class="badge bad" title="Many times the invoice amount — likely a misread of the PDF\'s PO BALANCE column rather than a real overage. Check the source PDF.">' + fmtMoney(li.exceedsPoBy) + ' ⚠</span>'
+            : '<span class="badge warn">' + fmtMoney(li.exceedsPoBy) + '</span>')
+          : '—') + '</td>' +
+        '<td style="text-align:right">' + (anomalous ? '<span class="badge warn" title="' + ANOMALY_MULTIPLE + 'x or more this vendor\'s typical amount">large</span>' : '—') + '</td>' +
+        '<td>' + (fundTypes.length ? escapeHtml(fundTypes.join(" + ")) : '<span style="color:var(--ink-dim)">—</span>') +
+          (glMismatch ? ' <span class="badge bad" title="GL lines sum to ' + fmtMoney(glSum) + ', but this invoice\'s amount is ' + fmtMoney(li.amount) + ' — a GL line was likely missed.">⚠</span>' : '') + '</td>' +
+      '</tr>';
+    }).join("") +
+    '</tbody></table></div>';
+  return html;
+}
+
+function renderDetailModal(id){
   const w = state.warrants.get(id);
   if (!w) return;
-  currentDetailId = id;
-  $("#dtTitle").textContent = (w.label || isoToLabel(w.dateISO)) + (w.warrantNo ? " · Warrant #" + w.warrantNo : "");
-  $("#dtSub").textContent = fmtMoney(w.total) + (w.invoiceCount != null ? " · " + w.invoiceCount + " invoices" : "");
-  $("#dtNotes").value = w.notes || "";
   const cats = Object.entries(w.categories || {}).sort((a, b) => b[1] - a[1]);
   const vends = Object.entries(w.vendors || {}).sort((a, b) => b[1] - a[1]);
   let html = "";
@@ -1277,55 +1355,70 @@ function openDetail(id){
     html += '<div style="margin-bottom:14px"><span class="badge bad" title="These invoices\' GL allocation lines don\'t add up to their own amount — a GL line was likely missed. Check the source PDF.">' +
       dtGlMismatches.length + ' invoice' + (dtGlMismatches.length === 1 ? "" : "s") + ' with GL lines that don\'t reconcile</span></div>';
   }
-  html += '<h3 style="font-size:13.5px;margin-bottom:8px">By category</h3>';
+  html += '<h3 style="font-size:13.5px;margin-bottom:8px">By category <span style="font-weight:400;color:var(--ink-dim);font-size:11px">(click a row to filter line items below)</span></h3>';
   html += cats.length
-    ? '<table class="mini-table">' + cats.map(([k, v]) => '<tr><td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>').join("") + '</table>'
+    ? '<table class="mini-table">' + cats.map(([k, v]) =>
+        '<tr data-category="' + escapeHtml(k) + '" style="cursor:pointer' + (k === dtCategoryFilter ? ';background:var(--surface-2)' : '') + '">' +
+          '<td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>'
+      ).join("") + '</table>'
     : '<div class="empty" style="padding:10px 0">No category breakdown saved for this warrant.</div>';
-  html += '<h3 style="font-size:13.5px;margin:16px 0 8px">By vendor</h3>';
-  html += vends.length
-    ? '<table class="mini-table">' + vends.map(([k, v]) => '<tr><td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>').join("") + '</table>'
-    : '<div class="empty" style="padding:10px 0">No vendor detail saved for this warrant.</div>';
-  html += '<h3 style="font-size:13.5px;margin:16px 0 8px">Line items</h3>';
-  const dtItems = (w.lineItems || []).slice().sort((a, b) =>
-    String(a.batch || "").localeCompare(String(b.batch || "")) || (Number(b.amount) || 0) - (Number(a.amount) || 0)
-  );
-  if (dtItems.length) {
-    html += '<div class="scroll-box"><table class="mini-table">' +
-      '<thead><tr>' +
-        '<th>Batch</th><th>Voucher</th><th>Vendor</th><th>Description</th>' +
-        '<th style="text-align:right">Amount</th><th style="text-align:right">Exceeds PO</th><th style="text-align:right">Unusual?</th><th>Fund</th>' +
-      '</tr></thead><tbody>' +
-      dtItems.map(li => {
-        const anomalous = isAnomalousAmount(li.amount, vendorMedianCache[li.vendor]);
-        const implausiblePo = isImplausiblePoOverage(li.amount, li.exceedsPoBy);
-        const glSum = glLinesSum(li);
-        const glMismatch = (li.glLines || []).length && Math.abs(glSum - round2(li.amount)) > GL_SUM_TOLERANCE;
-        const fundTypes = glFundTypes(li);
-        return '<tr>' +
-          '<td class="mono">' + escapeHtml(li.batch || "—") + '</td>' +
-          '<td class="mono">' + escapeHtml(li.voucher || "—") + '</td>' +
-          '<td>' + escapeHtml(li.vendor || "") + '</td>' +
-          '<td>' + escapeHtml(li.description || "") + '</td>' +
-          '<td style="text-align:right" class="mono">' + fmtMoney(li.amount) + '</td>' +
-          '<td style="text-align:right" class="mono">' + (Number(li.exceedsPoBy) > 0
-            ? (implausiblePo
-              ? '<span class="badge bad" title="Many times the invoice amount — likely a misread of the PDF\'s PO BALANCE column rather than a real overage. Check the source PDF.">' + fmtMoney(li.exceedsPoBy) + ' ⚠</span>'
-              : '<span class="badge warn">' + fmtMoney(li.exceedsPoBy) + '</span>')
-            : '—') + '</td>' +
-          '<td style="text-align:right">' + (anomalous ? '<span class="badge warn" title="' + ANOMALY_MULTIPLE + 'x or more this vendor\'s typical amount">large</span>' : '—') + '</td>' +
-          '<td>' + (fundTypes.length ? escapeHtml(fundTypes.join(" + ")) : '<span style="color:var(--ink-dim)">—</span>') +
-            (glMismatch ? ' <span class="badge bad" title="GL lines sum to ' + fmtMoney(glSum) + ', but this invoice\'s amount is ' + fmtMoney(li.amount) + ' — a GL line was likely missed.">⚠</span>' : '') + '</td>' +
-        '</tr>';
-      }).join("") +
-      '</tbody></table></div>';
-  } else {
-    html += '<div class="empty" style="padding:10px 0">No line-item detail saved for this warrant — it predates per-line-item capture, or has no source PDF on file.</div>';
-  }
+  html += '<details style="margin-top:16px"' + (dtVendorOpen ? ' open' : '') + '>' +
+    '<summary style="font-size:13.5px;font-weight:700;cursor:pointer">By vendor</summary>' +
+    '<div style="margin-top:8px">' +
+    (vends.length
+      ? '<table class="mini-table">' + vends.map(([k, v]) => '<tr><td>' + escapeHtml(k) + '</td><td style="text-align:right" class="mono">' + fmtMoney(v) + '</td></tr>').join("") + '</table>'
+      : '<div class="empty" style="padding:10px 0">No vendor detail saved for this warrant.</div>') +
+    '</div></details>';
+  html += renderDtLineItemsTable(w);
   $("#detailBody").innerHTML = html;
+}
+
+function openDetail(id){
+  const w = state.warrants.get(id);
+  if (!w) return;
+  currentDetailId = id;
+  dtCategoryFilter = null;
+  dtLineSort = { key: "batch", dir: "asc" };
+  dtVendorOpen = false;
+  $("#dtTitle").textContent = (w.label || isoToLabel(w.dateISO)) + (w.warrantNo ? " · Warrant #" + w.warrantNo : "");
+  $("#dtSub").textContent = fmtMoney(w.total) + (w.invoiceCount != null ? " · " + w.invoiceCount + " invoices" : "");
+  $("#dtNotes").value = w.notes || "";
+  renderDetailModal(id);
   $("#detailModal").hidden = false;
 }
 $("#detailClose").addEventListener("click", () => { $("#detailModal").hidden = true; });
 $("#detailModal").addEventListener("click", (e) => { if (e.target.id === "detailModal") $("#detailModal").hidden = true; });
+// Delegated so it survives renderDetailModal()'s innerHTML rebuilds — a
+// category-row click toggles that category as a filter on the line-items
+// table below (clicking the active one clears it), a sort-header click
+// toggles that column's sort direction, and "clear" drops the filter. The
+// "By vendor" <details> open/closed state is tracked separately (capture
+// phase, since "toggle" doesn't bubble) so it survives those rebuilds too.
+$("#detailBody").addEventListener("click", (e) => {
+  const clearLink = e.target.closest("[data-clear-category]");
+  if (clearLink) {
+    e.preventDefault();
+    dtCategoryFilter = null;
+    if (currentDetailId) renderDetailModal(currentDetailId);
+    return;
+  }
+  const catRow = e.target.closest("tr[data-category]");
+  if (catRow) {
+    const cat = catRow.dataset.category;
+    dtCategoryFilter = (dtCategoryFilter === cat) ? null : cat;
+    if (currentDetailId) renderDetailModal(currentDetailId);
+    return;
+  }
+  const sortBtn = e.target.closest("[data-sort-key]");
+  if (sortBtn) {
+    const key = sortBtn.dataset.sortKey;
+    dtLineSort = { key, dir: (dtLineSort.key === key && dtLineSort.dir === "asc") ? "desc" : "asc" };
+    if (currentDetailId) renderDetailModal(currentDetailId);
+  }
+});
+$("#detailBody").addEventListener("toggle", (e) => {
+  if (e.target && e.target.tagName === "DETAILS") dtVendorOpen = e.target.open;
+}, true);
 
 // Notes are the one field on an already-saved warrant this UI lets you edit
 // after the fact — everything else is a PUT with the record otherwise
