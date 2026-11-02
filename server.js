@@ -555,19 +555,38 @@ app.post("/api/extract", async (req, res) => {
       },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 4096,
+        // Raised from 4096 after GL-line capture was added to the
+        // extraction schema (each invoice line can now carry a nested
+        // glLines array) — a page-batch with several invoices, each with
+        // multiple GL lines, can produce JSON long enough to hit the old
+        // ceiling mid-object, which truncates the reply into unparseable
+        // JSON (the "Claude's reply had no parseable JSON" 422 case below).
+        // Confirmed happening on at least one real page-batch the same day
+        // this was raised (2026-10-01, pages 19-24, during a GL backfill
+        // dry run) — this is a real, not theoretical, failure mode.
+        max_tokens: 8192,
         messages: [{ role: "user", content }],
       }),
     });
     const data = await resp.json();
     if (!resp.ok) {
-      return res.status(502).json({ error: (data && data.error && data.error.message) || "Anthropic API error" });
+      const msg = (data && data.error && data.error.message) || "Anthropic API error";
+      console.error(`/api/extract: Anthropic API error (HTTP ${resp.status}): ${msg}`);
+      return res.status(502).json({ error: msg });
     }
     const text = (data.content || []).map((b) => b.text || "").join("");
     const parsed = tolerantJsonParse(text);
-    if (parsed === undefined) return res.status(422).json({ error: "Claude's reply had no parseable JSON.", raw: text });
+    if (parsed === undefined) {
+      // stop_reason "max_tokens" here means the reply was cut off mid-JSON
+      // by the max_tokens ceiling, not a genuine formatting mistake — worth
+      // distinguishing in the log, since the fix for one (raise max_tokens)
+      // does nothing for the other (a real malformed reply).
+      console.error(`/api/extract: unparseable JSON reply (stop_reason: ${data.stop_reason || "unknown"}, length: ${text.length} chars)`);
+      return res.status(422).json({ error: "Claude's reply had no parseable JSON.", raw: text, stopReason: data.stop_reason || null });
+    }
     res.json(parsed);
   } catch (e) {
+    console.error("/api/extract: request failed:", (e && e.message) || e);
     res.status(500).json({ error: String((e && e.message) || e) });
   }
 });
