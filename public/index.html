@@ -1792,20 +1792,40 @@ function openReviewAndWait(merged, file, queueLabel){
   return new Promise(resolve => { reviewCloseResolve = resolve; });
 }
 
+// Larger bill schedules (more total pages) produce proportionally larger
+// request bodies once rasterized to JPEG and base64-encoded. Confirmed real
+// case (2026-11-05 warrant, 22 pages / 4.2MB source PDF): fixed 6-page
+// chunks at scale 1.4 / quality 0.8 produced per-request bodies large
+// enough that Nginx Proxy Manager returned 408 Request Timeout — its
+// client_body_timeout, which fires when nginx is still waiting on US to
+// finish SENDING a request, not when the backend is slow to respond.
+// Confirmed via `docker stats` showing near-zero CPU/memory on the ledger
+// container during the failure (ruling out a stuck/slow backend) and a
+// clean NPM error log otherwise, so the fix is to shrink each individual
+// request's body for page-heavy documents rather than raise timeouts
+// further. Typical warrants (<=10 pages) are unaffected — same settings as
+// before.
+function rasterSettingsForPageCount(totalPages){
+  if (totalPages > 18) return { scale: 1.25, quality: 0.75, batch: 3 };
+  if (totalPages > 10) return { scale: 1.35, quality: 0.78, batch: 4 };
+  return { scale: 1.4, quality: 0.8, batch: 6 };
+}
+
 async function renderPdfToImages(file, onProgress){
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const { scale, quality } = rasterSettingsForPageCount(pdf.numPages);
   const images = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     onProgress("Rendering page " + i + " of " + pdf.numPages, (i / pdf.numPages) * 25);
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 1.4 });
+    const viewport = page.getViewport({ scale });
     const canvas = document.createElement("canvas");
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
     const ctx = canvas.getContext("2d");
     await page.render({ canvasContext: ctx, viewport }).promise;
-    images.push(canvas.toDataURL("image/jpeg", 0.8));
+    images.push(canvas.toDataURL("image/jpeg", quality));
   }
   return images;
 }
@@ -1859,7 +1879,7 @@ async function callExtract(prompt, images, signal){
 }
 
 async function extractWarrant(images, onProgress){
-  const BATCH = 6;
+  const { batch: BATCH } = rasterSettingsForPageCount(images.length);
   const merged = { coverDate: null, coverTotal: null, warrantNo: null, summaryRows: [], lineItems: [] };
   const total = images.length;
   currentAbort = new AbortController();
